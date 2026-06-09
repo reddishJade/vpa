@@ -1,0 +1,33 @@
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+
+# uv
+.python-version
+
+# Tools
+.ruff_cache/
+.claude/
+
+# Environment
+.env
+
+# Default output directory
+promotion_output/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
