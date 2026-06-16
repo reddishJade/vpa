@@ -139,6 +139,7 @@ TOOL_DEFINITIONS: list[ChatCompletionFunctionToolParam] = [
                 "Edit a file by exact string replacement. "
                 "ALWAYS call with dry_run=true FIRST. "
                 "After editing, verify with run_bash('git diff -- <path>'). "
+                "Requires commit_sha for intent validation. "
                 "Returns {matched: bool, count: int}."
             ),
             "strict": True,
@@ -161,8 +162,12 @@ TOOL_DEFINITIONS: list[ChatCompletionFunctionToolParam] = [
                         "type": "boolean",
                         "description": "true = check match only, false = execute replacement",
                     },
+                    "commit_sha": {
+                        "type": "string",
+                        "description": "Full commit SHA (for intent validation)",
+                    },
                 },
-                "required": ["path", "old_string", "new_string", "dry_run"],
+                "required": ["path", "old_string", "new_string", "dry_run", "commit_sha"],
                 "additionalProperties": False,
             },
         },
@@ -172,7 +177,8 @@ TOOL_DEFINITIONS: list[ChatCompletionFunctionToolParam] = [
         "function": {
             "name": "write_file",
             "description": (
-                "Create a NEW file in the local repo. Fails if already exists."
+                "Create a NEW file in the local repo. Fails if already exists. "
+                "Requires commit_sha for intent validation."
             ),
             "strict": True,
             "parameters": {
@@ -186,8 +192,12 @@ TOOL_DEFINITIONS: list[ChatCompletionFunctionToolParam] = [
                         "type": "string",
                         "description": "Full file content",
                     },
+                    "commit_sha": {
+                        "type": "string",
+                        "description": "Full commit SHA (for intent validation)",
+                    },
                 },
-                "required": ["path", "content"],
+                "required": ["path", "content", "commit_sha"],
                 "additionalProperties": False,
             },
         },
@@ -546,7 +556,23 @@ class ToolHandler:
 
     # ── Edit tools ──────────────────────────────────────────────────────
 
-    def _tool_edit_file(self, path, old_string, new_string, dry_run):
+    def _intent_gate(self, commit_sha):
+        """Return error dict if intent_summary missing for commit, else None."""
+        if not commit_sha:
+            return {"error": "commit_sha is required"}
+        entry = self.ledger.get("commits", {}).get(commit_sha)
+        if entry is None:
+            return {"error": f"commit {commit_sha[:8]} not found in ledger"}
+        if not entry.get("intent_summary"):
+            return {
+                "error": (
+                    f"intent_summary not yet recorded for commit {commit_sha[:8]}. "
+                    "Call record_intent() before any edits."
+                )
+            }
+        return None
+
+    def _tool_edit_file(self, path, old_string, new_string, dry_run, commit_sha):
         try:
             full_path = self._resolve_safe_path(path)
         except ValueError as e:
@@ -562,8 +588,14 @@ class ToolHandler:
             return {"matched": False, "count": 0}
 
         if dry_run:
+            # Dry-run is a read-only operation — no intent check needed
             self._dry_run_verified.add((path, old_string))
             return {"matched": True, "count": count, "dry_run": True}
+
+        # Actual mutation — enforce intent gate
+        gate_err = self._intent_gate(commit_sha)
+        if gate_err:
+            return gate_err
 
         # Require prior dry_run verification for this (path, old_string)
         if (path, old_string) not in self._dry_run_verified:
@@ -587,7 +619,10 @@ class ToolHandler:
         self._edit_counts[path] = ecount + 1
         return {"matched": True, "count": count, "dry_run": False, "replaced": 1}
 
-    def _tool_write_file(self, path, content):
+    def _tool_write_file(self, path, content, commit_sha):
+        gate_err = self._intent_gate(commit_sha)
+        if gate_err:
+            return gate_err
         try:
             full_path = self._resolve_safe_path(path)
         except ValueError as e:
@@ -612,7 +647,32 @@ class ToolHandler:
         L.write_ledger(self.ledger_path, self.ledger)
         return {"started": True, "work_item_id": work_item_id}
 
+    @staticmethod
+    def _validate_evidence(evidence):
+        """Validate evidence entries. Returns None or an error dict."""
+        if not evidence:
+            return {"error": "evidence is required for append_decision"}
+        if not isinstance(evidence, list):
+            return {"error": "evidence must be a list"}
+        for i, e in enumerate(evidence):
+            if not isinstance(e, dict):
+                return {"error": f"evidence[{i}] must be an object"}
+            file_val = e.get("file")
+            line_val = e.get("line")
+            snippet_val = e.get("snippet")
+            if not file_val or not isinstance(file_val, str) or not file_val.strip():
+                return {"error": f"evidence[{i}].file must be a non-empty string"}
+            if not isinstance(line_val, int) or line_val <= 0:
+                return {"error": f"evidence[{i}].line must be a positive integer"}
+            if not snippet_val or not isinstance(snippet_val, str) or not snippet_val.strip():
+                return {"error": f"evidence[{i}].snippet must be a non-empty string"}
+        return None
+
     def _tool_append_decision(self, commit_sha, work_item_id, confidence, reason, evidence=None):
+        # Evidence gate: all decisions require verifiable evidence
+        err = self._validate_evidence(evidence)
+        if err:
+            return err
         L.append_decision(
             self.ledger, commit_sha, work_item_id, confidence, reason, evidence
         )
@@ -620,6 +680,23 @@ class ToolHandler:
         return {"appended": True, "work_item_id": work_item_id}
 
     def _tool_complete_work_item(self, commit_sha, work_item_id, status, method=None):
+        # Completion gate: must have a decision for the current attempt
+        try:
+            wi = L._get_work_item(self.ledger, commit_sha, work_item_id)
+        except KeyError as e:
+            return {"error": str(e)}
+        current_attempt = wi["attempt_count"]
+        has_decision = any(
+            d.get("attempt") == current_attempt
+            for d in wi.get("decisions", [])
+        )
+        if not has_decision:
+            return {
+                "error": (
+                    f"work item {work_item_id} has no decision for attempt "
+                    f"{current_attempt}. Call append_decision() first."
+                )
+            }
         L.complete_work_item(
             self.ledger, commit_sha, work_item_id, status, method=method
         )

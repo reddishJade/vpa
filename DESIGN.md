@@ -178,9 +178,18 @@ No reverse transitions. No skipping `in_progress`. `validation_failed` cannot go
 
 Decision `evidence` entries must be **verifiable**: file + line number + snippet. Not free-text assertions. Reviewers or next agent instances can directly verify.
 
+Evidence is now **tool-enforced**: `append_decision` rejects empty or malformed
+evidence. Every decision must include at least one evidence entry with non-empty
+`file`, positive `line`, and non-empty `snippet`. The `request_human` tool is
+exempt (it represents the agent's inability to resolve).
+
 ### Intent Summary Ordering
 
 `intent_summary` must be generated after reading upstream diff and **before** any edits. System prompt enforces this ordering. No post-hoc rationalization.
+
+Intent ordering is now **tool-enforced**: `edit_file` and `write_file` reject
+mutations when `intent_summary` is missing for the target commit. Dry-run reads
+remain allowed (they do not change files).
 
 ### API Constraints
 
@@ -189,11 +198,11 @@ Harness creates structure; agent advances state; decisions are append-only.
 | API | Caller | Semantics |
 |-----|--------|-----------|
 | `init_commit_entry()` | Harness | Create commit skeleton + work items (all pending) |
-| `record_intent()` | Agent (via tool) | Record intent_summary BEFORE any edits |
+| `record_intent()` | Agent (via tool) | Record intent_summary BEFORE any edits. Tool-enforced: edit/write blocked until intent recorded. |
 | `init_work_items()` | Harness | Populate work items for a commit |
 | `start_work_item()` | Agent (via tool) or Harness | `pending → in_progress` |
-| `append_decision()` | Agent (via tool) | Append-only decision record |
-| `complete_work_item()` | Agent (via tool) | `in_progress → ported/skipped/needs_human/blocked/validation_failed` |
+| `append_decision()` | Agent (via tool) | Append-only decision record. Tool-enforced: requires at least one evidence entry (file + line + snippet). |
+| `complete_work_item()` | Agent (via tool) | `in_progress → ported/skipped/needs_human/blocked/validation_failed`. Tool-enforced: requires prior append_decision for this attempt. |
 | `record_validation()` | Harness | Record fast/slow validation results |
 | `derive_commit_status()` | Harness (computed) | Derived from work item states, not set directly |
 
@@ -206,12 +215,12 @@ Harness creates structure; agent advances state; decisions are append-only.
 | `run_bash(cmd)` | Shell: `git log/diff/blame`, `grep`, build, test. Command whitelist enforced by harness. |
 | `read_file(path, lines?)` | Read specific file, optional line range to avoid context bloat |
 | `search_symbol(symbol, repo, kind, file_filter?)` | Cross-repo symbol search. Harness-implemented with `grep -rn`. Returns structured results with single-line context. |
-| `edit_file(path, old, new, dry_run=False)` | Exact string replacement. `dry_run=True` returns match count without writing. |
-| `write_file(path, content)` | Create new file |
+| `edit_file(path, old, new, dry_run, commit_sha)` | Exact string replacement. `dry_run=True` returns match count without writing. `commit_sha` required for intent gate. |
+| `write_file(path, content, commit_sha)` | Create new file. `commit_sha` required for intent gate. |
 | `record_intent(commit_sha, intent_summary)` | Record upstream intent BEFORE any edits |
 | `start_work_item(commit_sha, work_item_id)` | `pending → in_progress` |
-| `append_decision(commit_sha, work_item_id, confidence, reason, evidence?)` | Append-only decision record |
-| `complete_work_item(commit_sha, work_item_id, status, method?)` | Transition work item to terminal status |
+| `append_decision(commit_sha, work_item_id, confidence, reason, evidence)` | Append-only decision record. Evidence required (file + line + snippet). |
+| `complete_work_item(commit_sha, work_item_id, status, method?)` | Transition work item to terminal status. Requires prior append_decision. |
 | `create_work_item(commit_sha, kind, description)` | Create synthetic work item (local-only adaptation) |
 | `request_human(commit_sha, work_item_id, reason)` | Request human intervention |
 | `signal_done(commit_sha)` | Declare current slice complete (validates terminal states) |
