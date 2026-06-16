@@ -77,6 +77,7 @@ def generate_summary(ledger, fast_results, slow_results):
         for sha, entry in commits.items()
         if entry["status"] in (
             "needs_human", "partially_ported", "validation_failed", "final_manual",
+            "blocked",
         )
     ]
     if manual_entries:
@@ -93,6 +94,27 @@ def generate_summary(ledger, fast_results, slow_results):
                     lines.append(
                         f"- `{wi['id']}` ({wi['kind']}, {wi['status']}): {reason}"
                     )
+                    if latest and latest.get("evidence"):
+                        for ev in latest["evidence"]:
+                            file = ev.get("file", "?")
+                            line = ev.get("line", "")
+                            snippet = ev.get("snippet", "")
+                            loc = f"{file}:{line}" if line else file
+                            ev_line = f"  - Evidence: {loc}"
+                            if snippet:
+                                ev_line += f" `{snippet[:60]}`"
+                            lines.append(ev_line)
+            if entry["status"] == "validation_failed":
+                v = entry.get("validation", {})
+                for vtype in ("fast", "slow"):
+                    vresult = v.get(vtype, {})
+                    if vresult.get("status") == "failed":
+                        cmd = vresult.get("command", "?")
+                        ec = vresult.get("exit_code", "?")
+                        summary = vresult.get("summary", "")
+                        lines.append(f"  - Validation ({vtype}): `{cmd}` (exit_code={ec})")
+                        if summary:
+                            lines.append(f"    Summary: {summary[:200]}")
             lines.append("")
     else:
         lines.append("None.")
