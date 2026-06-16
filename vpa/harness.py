@@ -187,6 +187,8 @@ def run_promotion(
                 with contextlib.suppress(KeyError, ValueError):
                     L.complete_work_item(ledger, sha, wi_id, "blocked")
             L.write_ledger(ledger_path, ledger)
+            processed_commits.add(sha)
+            commits_since_restart += 1
             continue
 
         # Reload ledger
@@ -215,6 +217,8 @@ def run_promotion(
                  "summary": f"Git verify failed: {detail}"},
             )
             L.write_ledger(ledger_path, ledger)
+            processed_commits.add(sha)
+            commits_since_restart += 1
             continue
 
         # Fast validation — only if ALL work items for this commit are terminal
@@ -255,6 +259,8 @@ def run_promotion(
                             ledger, sha, ported_items, vresults2
                         )
                         L.write_ledger(ledger_path, ledger)
+                        processed_commits.add(sha)
+                        commits_since_restart += 1
                         continue
                     L.record_validation(
                         ledger, sha, "fast",
@@ -269,6 +275,8 @@ def run_promotion(
                         ledger, sha, ported_items, vresults
                     )
                     L.write_ledger(ledger_path, ledger)
+                    processed_commits.add(sha)
+                    commits_since_restart += 1
                     continue
 
         # Track restart (terminal means done, even if unsuccessful)
