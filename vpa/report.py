@@ -215,6 +215,26 @@ def _identify_risks(ledger, fast_results, slow_results):
         failed = [r.command for r in slow_results if not r.passed]
         risks.append(f"Slow validation failures: {', '.join(failed)}")
 
+    # Commits in validation_failed state
+    vf_commits = [
+        sha[:8] for sha, c in ledger["commits"].items()
+        if c["status"] == "validation_failed"
+    ]
+    if vf_commits:
+        risks.append(
+            f"Validation failed commits requiring attention: {', '.join(vf_commits)}"
+        )
+
+    # Git verification warnings from commit entries
+    git_warnings = []
+    for sha, c in ledger["commits"].items():
+        for w in c.get("warnings", []):
+            git_warnings.append(f"{sha[:8]}: {w}")
+    if git_warnings:
+        risks.append("Git verification warnings:")
+        for gw in git_warnings:
+            risks.append(f"  - {gw}")
+
     # Commits with no intent_summary (agent skipped the record_intent step)
     no_intent = [
         sha[:8]

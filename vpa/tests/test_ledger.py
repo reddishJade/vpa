@@ -5,6 +5,7 @@ services are required.
 """
 
 import json
+import subprocess
 import tempfile
 from pathlib import Path
 from unittest import TestCase
@@ -481,3 +482,65 @@ class TestLedgerEdgeCases(TestCase):
         results = list(L.iter_manual_required(ld))
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0][0], sha1)
+
+
+# ── Git verification ────────────────────────────────────────────────────
+
+
+class TestGitVerify(TestCase):
+    """git_verify checks that claimed modified files appear in git diff HEAD."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        subprocess.run(["git", "init"], cwd=self.tmp, capture_output=True)
+        subprocess.run(
+            ["git", "config", "user.email", "test@test.com"],
+            cwd=self.tmp, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "user.name", "Test"],
+            cwd=self.tmp, capture_output=True,
+        )
+        (self.tmp / "file.c").write_text("int y = 2;\n")
+        subprocess.run(["git", "add", "."], cwd=self.tmp, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "initial"],
+            cwd=self.tmp, capture_output=True,
+        )
+
+    def tearDown(self):
+        subprocess.run(["rm", "-rf", str(self.tmp)])
+
+    def test_no_files_claimed_returns_ok(self):
+        entry = {"local_files_modified": []}
+        ok, detail = L.git_verify(str(self.tmp), entry)
+        self.assertTrue(ok)
+        self.assertIn("no files claimed", detail)
+
+    def test_all_files_match_returns_ok(self):
+        (self.tmp / "file.c").write_text("int x = 1;\n")
+        ok, detail = L.git_verify(str(self.tmp), {"local_files_modified": ["file.c"]})
+        self.assertTrue(ok)
+        self.assertIn("all 1 files confirmed", detail)
+
+    def test_no_overlap_returns_false(self):
+        (self.tmp / "file.c").write_text("int x = 1;\n")
+        entry = {"local_files_modified": ["other.c"]}
+        ok, detail = L.git_verify(str(self.tmp), entry)
+        self.assertFalse(ok)
+        self.assertIn("none of", detail)
+
+    def test_partial_match_returns_true_with_warning(self):
+        (self.tmp / "file.c").write_text("int x = 1;\n")
+        entry = {"local_files_modified": ["file.c", "missing.c"]}
+        ok, detail = L.git_verify(str(self.tmp), entry)
+        self.assertTrue(ok)
+        self.assertIn("partial match", detail)
+        self.assertIn("file.c", detail)
+        self.assertIn("missing.c", detail)
+
+    def test_git_diff_failure_returns_false(self):
+        entry = {"local_files_modified": ["file.c"]}
+        ok, detail = L.git_verify("/nonexistent/path", entry)
+        self.assertFalse(ok)
+        self.assertIn("git diff failed", detail)

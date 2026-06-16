@@ -371,6 +371,36 @@ class TestHarnessValidationFailedPath(TestCase):
         assert entry["validation"]["fast"]["status"] == "failed"
         assert "validation_failed" in summary.lower()
 
+    def test_validation_failure_records_command_exit_code_summary(self):
+        """Fast validation failure must record command, exit_code, and summary."""
+        agent = MockAgent([
+            _porting_seq(self.sha),
+            [],
+        ])
+        fail_result = [VerifyResult(
+            passed=False, command="make", exit_code=1, stderr="build error",
+        )]
+        validation = MockValidation([fail_result, fail_result])
+        run_promotion(
+            upstream_path=str(self.upstream),
+            local_path=str(self.local),
+            upstream_old=self.old,
+            upstream_new=self.sha,
+            local_branch="main",
+            build_cmd="make",
+            fast_test_cmds=["make test"],
+            output_dir=str(self.output),
+            api_key="test-key",
+            agent_runner=agent,
+            validation_runner=validation,
+        )
+        ledger = L.load_ledger(self.output / "ledger.json")
+        v = ledger["commits"][self.sha]["validation"]["fast"]
+        assert v["status"] == "failed"
+        assert v["command"] == "make"
+        assert v["exit_code"] == 1
+        assert "build error" in v["summary"]
+
     def test_subsequent_run_skips_validation_failed(self):
         agent1 = MockAgent([_porting_seq(self.sha), []])
         fail = [VerifyResult(passed=False, command="make", exit_code=1)]
@@ -466,4 +496,61 @@ class TestHarnessFinalManualPath(TestCase):
         ledger = L.load_ledger(self.output / "ledger.json")
         assert ledger["commits"][self.sha]["status"] == "final_manual"
         assert "final_manual" in summary.lower()
+        assert self.sha[:8] in summary
+
+
+# ── 5. Report visibility ────────────────────────────────────────────────
+
+
+class TestReportVisibility(TestCase):
+    """Report must surface validation_failed and Git verification warnings."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.upstream, self.local, self.sha, self.old = _create_fixture_repos(self.tmp)
+        self.output = self.tmp / "out"
+        self.output.mkdir()
+
+    def tearDown(self):
+        subprocess.run(["rm", "-rf", str(self.tmp)])
+
+    def test_report_contains_validation_failed_risk(self):
+        """validation_failed commits appear in the risk section."""
+        agent = MockAgent([_porting_seq(self.sha), []])
+        fail = [VerifyResult(passed=False, command="make", exit_code=1)]
+        validation = MockValidation([fail, fail])
+        summary, _ = run_promotion(
+            upstream_path=str(self.upstream),
+            local_path=str(self.local),
+            upstream_old=self.old,
+            upstream_new=self.sha,
+            local_branch="main",
+            build_cmd="make",
+            fast_test_cmds=["make test"],
+            output_dir=str(self.output),
+            api_key="test-key",
+            agent_runner=agent,
+            validation_runner=validation,
+        )
+        assert "Validation failed commits requiring attention" in summary
+        assert self.sha[:8] in summary
+
+    def test_report_contains_git_verify_warning(self):
+        """Git verification warnings appear in the report risk section."""
+        from vpa.report import generate_summary
+
+        meta = L.init_session_meta(
+            "upstream", self.old, self.sha, "local", "main", "arch",
+            str(self.upstream), str(self.local), "make", ["test"], [],
+        )
+        ledger, _ = L.init_ledger(meta, self.output)
+        L.init_commit_entry(ledger, self.sha, "Add x", ["file.c"])
+        entry = ledger["commits"][self.sha]
+        entry["warnings"].append(
+            "Git verify: partial match: found file.c, missing other.c"
+        )
+
+        summary = generate_summary(ledger, [], [])
+        assert "Git verification warnings" in summary
+        assert "partial match" in summary
         assert self.sha[:8] in summary

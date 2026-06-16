@@ -140,6 +140,7 @@ def init_commit_entry(ledger, commit_sha, upstream_subject, upstream_files):
         "status": "pending",
         "upstream_files": upstream_files,
         "local_files_modified": [],
+        "warnings": [],
         "work_items": [],
         "validation": {},
     }

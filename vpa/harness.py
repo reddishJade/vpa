@@ -1,5 +1,6 @@
 import contextlib
 import os
+import sys
 from pathlib import Path
 
 from . import ledger as L
@@ -194,10 +195,20 @@ def run_promotion(
         # Git verify
         entry = ledger["commits"].get(sha, {})
         ok, detail = L.git_verify(local_path, entry)
+        if "partial match" in detail:
+            entry.setdefault("warnings", []).append(
+                f"Git verify: {detail}"
+            )
         if not ok:
-            for wi_id in wi_ids:
-                with contextlib.suppress(KeyError, ValueError):
-                    L.complete_work_item(ledger, sha, wi_id, "validation_failed")
+            for wi in entry.get("work_items", []):
+                if L._transition_allowed(wi["status"], "validation_failed"):
+                    L.complete_work_item(ledger, sha, wi["id"], "validation_failed")
+                else:
+                    print(
+                        f"WARNING: cannot mark {wi['id']} as validation_failed "
+                        f"(current: {wi['status']}) after git verify failure",
+                        file=sys.stderr,
+                    )
             L.record_validation(
                 ledger, sha, "fast",
                 {"status": "failed", "command": "git diff HEAD", "exit_code": -1,
@@ -241,7 +252,7 @@ def run_promotion(
                     fast_results.extend(vresults2)
                     if validation_failed(vresults2):
                         _mark_items_validation_failed(
-                            ledger, sha, ported_items, format_verify_results(vresults2)
+                            ledger, sha, ported_items, vresults2
                         )
                         L.write_ledger(ledger_path, ledger)
                         continue
@@ -255,7 +266,7 @@ def run_promotion(
                     )
                 else:
                     _mark_items_validation_failed(
-                        ledger, sha, ported_items, format_verify_results(vresults)
+                        ledger, sha, ported_items, vresults
                     )
                     L.write_ledger(ledger_path, ledger)
                     continue
@@ -385,18 +396,10 @@ def retry_with_hint(
     # Fast validation
     vresults = run_fast_validation(build_cmd, fast_test_cmds, local_path)
     if validation_failed(vresults):
-        L.record_validation(
-            ledger, commit_sha, "fast",
-            {
-                "status": "failed",
-                "command": build_cmd,
-                "summary": format_verify_results(vresults),
-            },
-        )
         _mark_items_validation_failed(
             ledger, commit_sha,
             [wi for wi in entry.get("work_items", []) if wi["status"] == "ported"],
-            format_verify_results(vresults),
+            vresults,
         )
         L.write_ledger(ledger_path, ledger)
         return None
@@ -440,16 +443,31 @@ def _attempt_fix(system_prompt, vresults, tool_handler, model, api_key, base_url
         return False
 
 
-def _mark_items_validation_failed(ledger, commit_sha, work_items, summary):
+def _mark_items_validation_failed(ledger, commit_sha, work_items, vresults):
     """Mark work items as validation_failed and record the validation result."""
+    summary = format_verify_results(vresults)
+    first = vresults[0] if vresults else None
+    command = first.command if first else "unknown"
+    exit_code = first.exit_code if first else -1
     for wi in work_items:
-        with contextlib.suppress(KeyError, ValueError):
+        try:
             L.complete_work_item(
                 ledger, commit_sha, wi["id"], "validation_failed"
             )
+        except (KeyError, ValueError) as exc:
+            print(
+                f"WARNING: could not mark {wi['id']} as validation_failed "
+                f"(current: {wi['status']}): {exc}",
+                file=sys.stderr,
+            )
     L.record_validation(
         ledger, commit_sha, "fast",
-        {"status": "failed", "summary": summary},
+        {
+            "status": "failed",
+            "command": command,
+            "exit_code": exit_code,
+            "summary": summary,
+        },
     )
 
 
