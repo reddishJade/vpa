@@ -107,13 +107,29 @@ Re-evaluate the porting strategy based on the above guidance. This is a task-lev
 instruction, not a suggestion."""
 
 
+def _risk_lines(snapshot):
+    """Compact risk lines from snapshot for restart context."""
+    lines = []
+    for sha, info in sorted(snapshot.items()):
+        risk = info.get("validation_failed")
+        if risk:
+            lines.append(f"  ! {sha[:8]}: validation failed — {risk}")
+        for w in info.get("warnings", []):
+            lines.append(f"  ! {sha[:8]}: {w[:120]}")
+    return lines
+
+
 def build_restart_context(ledger_snapshot, system_prompt, current_slice):
     snapshot_str = "\n".join(
         f"  {sha}: {info['status']} | {info.get('upstream_subject', '?')[:80]}"
         for sha, info in sorted(ledger_snapshot.items())
     )
+    risks = _risk_lines(ledger_snapshot)
+    risk_block = (
+        "\nRisk items:\n" + "\n".join(risks) if risks else ""
+    )
     user_message = f"""Resuming promotion. Ledger snapshot:
-{snapshot_str}
+{snapshot_str}{risk_block}
 
 Current unit: {current_slice}
 Proceed with porting this unit."""

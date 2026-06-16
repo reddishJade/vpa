@@ -332,6 +332,11 @@ def retry_with_hint(
     # Reset needs_human work items for hint-gated retry
     L.reset_for_retry(ledger, commit_sha)
     L.write_ledger(ledger_path, ledger)
+    # Track which items were reset to detect untouched items after retry
+    reset_ids = {
+        wi["id"]
+        for wi in entry.get("work_items", [])
+    }
 
     tool_handler = ToolHandler(local_path, upstream_path, ledger, ledger_path)
 
@@ -381,16 +386,11 @@ def retry_with_hint(
     ledger = L.load_ledger(ledger_path)
     entry = ledger["commits"].get(commit_sha, {})
 
-    # Check if still needs_human after retry
-    still_needs = [
-        wi for wi in entry.get("work_items", [])
-        if wi["status"] == "needs_human"
-    ]
-    if still_needs:
-        for wi in still_needs:
-            wi["status"] = "final_manual"
-        L._derive_commit_status(entry)
-        L.write_ledger(ledger_path, ledger)
+    # Items still needing human or left pending after retry → final_manual
+    _resolve_retry_cleanup(ledger, commit_sha, reset_ids, ledger_path)
+    entry = ledger["commits"].get(commit_sha, {})
+    # If any item transitioned to final_manual, commit is terminal
+    if any(wi["status"] == "final_manual" for wi in entry.get("work_items", [])):
         return None
 
     # Fast validation
@@ -481,6 +481,49 @@ def _all_work_items_terminal(entry):
         if wi["status"] not in L.TERMINAL_WORK_ITEM_STATUSES:
             return False
     return bool(entry.get("work_items"))
+
+
+def _resolve_retry_cleanup(ledger, commit_sha, reset_ids, ledger_path):
+    """After retry agent run, promote unresolved items to final_manual.
+
+    Items in needs_human or pending that were part of the retry reset
+    are transitioned to final_manual via the canonical state machine
+    (one retry only contract).
+
+    Pending items go through start_work_item first so all completions
+    pass through in_progress and the state machine invariant is preserved.
+    """
+    from pathlib import Path
+
+    entry = ledger["commits"].get(commit_sha, {})
+    changed = False
+    for wi in entry.get("work_items", []):
+        if wi["id"] not in reset_ids:
+            continue
+        if wi["status"] == "needs_human":
+            try:
+                L.complete_work_item(ledger, commit_sha, wi["id"], "final_manual")
+                changed = True
+            except ValueError as exc:
+                print(
+                    f"WARNING: could not mark {wi['id']} as final_manual "
+                    f"(needs_human → final_manual): {exc}",
+                    file=sys.stderr,
+                )
+        elif wi["status"] == "pending":
+            # Start the item so transition goes through in_progress
+            try:
+                L.start_work_item(ledger, commit_sha, wi["id"])
+                L.complete_work_item(ledger, commit_sha, wi["id"], "final_manual")
+                changed = True
+            except ValueError as exc:
+                print(
+                    f"WARNING: could not mark {wi['id']} as final_manual "
+                    f"(pending → in_progress → final_manual): {exc}",
+                    file=sys.stderr,
+                )
+    if changed:
+        L.write_ledger(Path(ledger_path), ledger)
 
 
 def _mark_items_blocked(ledger, commit_sha, reason):

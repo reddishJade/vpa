@@ -34,6 +34,9 @@ HARNESS_SKIP_STATUSES = frozenset({
 VALID_TRANSITIONS = {
     "pending": {
         "in_progress",
+        # NOTE: pending → final_manual is intentionally absent.
+        # Retry cleanup uses start_work_item() + complete_work_item()
+        # so all completions go through in_progress.
     },
     "in_progress": {
         "ported",
@@ -55,9 +58,11 @@ VALID_TRANSITIONS = {
     "validation_failed": {
         "needs_human",
     },
-    # needs_human must go through reset_for_retry → pending → in_progress
-    # Direct needs_human → in_progress is NOT allowed
-    # (harness gatekeeps with reset_for_retry)
+    "needs_human": {
+        "final_manual",
+        # needs_human → in_progress is NOT allowed (use reset_for_retry)
+        # needs_human → final_manual: one retry only contract
+    },
     "final_manual": set(),
     # Terminal states: skipped, blocked, final_manual — no outgoing
 }
@@ -376,13 +381,29 @@ def commit_snapshot(ledger):
     """Commit-level summary for restart context — compact enough for prompt."""
     result = {}
     for sha, entry in ledger["commits"].items():
-        result[sha] = {
+        snapshot = {
             "status": entry["status"],
             "intent_summary": entry.get("intent_summary"),
             "upstream_subject": entry.get("upstream_subject"),
             "local_files_modified": entry.get("local_files_modified", []),
+            "warnings": list(entry.get("warnings", [])),
         }
+        # Compact validation status for risk visibility
+        v = entry.get("validation", {})
+        if v.get("fast", {}).get("status") == "failed":
+            snapshot["validation_failed"] = _compact_validation(v["fast"])
+        result[sha] = snapshot
     return result
+
+
+def _compact_validation(vresult):
+    """Compact a validation result to a short risk line."""
+    parts = []
+    cmd = vresult.get("command", "?")
+    summary = vresult.get("summary", "")
+    if summary:
+        parts.append(summary[:120])
+    return f"fast:{cmd}" + (f" — {summary[:120]}" if summary else "")
 
 
 def ledger_for_prompt(ledger):
@@ -391,8 +412,15 @@ def ledger_for_prompt(ledger):
     for sha, entry in sorted(ledger["commits"].items()):
         short = sha[:8]
         subject = entry.get("upstream_subject", "")[:60]
+        markers = []
+        if entry.get("warnings"):
+            markers.append("!W")
+        v = entry.get("validation", {})
+        if v.get("fast", {}).get("status") == "failed":
+            markers.append("!V")
+        marker_str = " " + " ".join(markers) if markers else ""
         lines.append(
-            f"  {short}: {entry['status']} | {subject}"
+            f"  {short}: {entry['status']}{marker_str} | {subject}"
         )
     return "\n".join(lines) if lines else "  (no entries yet)"
 
