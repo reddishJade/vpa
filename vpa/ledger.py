@@ -47,6 +47,10 @@ VALID_TRANSITIONS = {
     "partially_ported": {
         "ported",
         "needs_human",
+        "validation_failed",
+    },
+    "ported": {
+        "validation_failed",
     },
     "validation_failed": {
         "needs_human",
@@ -55,7 +59,7 @@ VALID_TRANSITIONS = {
     # Direct needs_human → in_progress is NOT allowed
     # (harness gatekeeps with reset_for_retry)
     "final_manual": set(),
-    # Terminal states: ported, skipped, blocked, final_manual — no outgoing
+    # Terminal states: skipped, blocked, final_manual — no outgoing
 }
 
 ALLOWED_COMPLETION_STATUSES = {

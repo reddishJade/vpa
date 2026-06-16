@@ -41,7 +41,14 @@ def run_promotion(
     upstream_name="upstream",
     local_name="local",
     arch="<arch>",
+    agent_runner=None,
+    validation_runner=None,
 ):
+    if agent_runner is None:
+        from .agent import run_agent as agent_runner
+    if validation_runner is None:
+        from .verify import run_fast_validation as validation_runner
+
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("No API key: set OPENAI_API_KEY or pass api_key=")
@@ -165,7 +172,7 @@ def run_promotion(
         tool_handler = ToolHandler(local_path, upstream_path, ledger, ledger_path)
 
         try:
-            run_agent(
+            agent_runner(
                 system_prompt=sp,
                 user_message=um,
                 tools=TOOL_DEFINITIONS,
@@ -206,7 +213,7 @@ def run_promotion(
             if wi["status"] == "ported"
         ]
         if ported_items and all_terminal:
-            vresults = run_fast_validation(build_cmd, fast_test_cmds, local_path)
+            vresults = validation_runner(build_cmd, fast_test_cmds, local_path)
             fast_results.extend(vresults)
 
             passed = not validation_failed(vresults)
@@ -224,10 +231,11 @@ def run_promotion(
             if not passed:
                 # One self-repair attempt
                 fix_ok = _attempt_fix(
-                    sp, vresults, tool_handler, model, api_key, base_url
+                    sp, vresults, tool_handler, model, api_key, base_url,
+                    agent_runner=agent_runner,
                 )
                 if fix_ok:
-                    vresults2 = run_fast_validation(
+                    vresults2 = validation_runner(
                         build_cmd, fast_test_cmds, local_path
                     )
                     fast_results.extend(vresults2)
@@ -405,7 +413,10 @@ def _context_over(ledger, current_slice):
     return total / CONTEXT_LIMIT_CHARS > CONTEXT_USAGE_THRESHOLD
 
 
-def _attempt_fix(system_prompt, vresults, tool_handler, model, api_key, base_url):
+def _attempt_fix(system_prompt, vresults, tool_handler, model, api_key, base_url,
+                 agent_runner=None):
+    if agent_runner is None:
+        from .agent import run_agent as agent_runner
     failure_report = format_verify_results(vresults)
     fix_prompt = (
         f"{system_prompt}\n\n"
@@ -415,7 +426,7 @@ def _attempt_fix(system_prompt, vresults, tool_handler, model, api_key, base_url
         f"Failure output:\n{failure_report}"
     )
     try:
-        run_agent(
+        agent_runner(
             system_prompt=fix_prompt,
             user_message="Fix the build/test failures shown above.",
             tools=TOOL_DEFINITIONS,
