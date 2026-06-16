@@ -409,10 +409,14 @@ def retry_with_hint(
     return entry
 
 
+def _estimate_context_total(summary_size, slice_size):
+    return 3000 + summary_size + slice_size
+
+
 def _context_over(ledger, current_slice):
     summary = L.ledger_for_prompt(ledger)
     slice_text = current_slice.context or ""
-    total = 3000 + len(summary) + len(slice_text)
+    total = _estimate_context_total(len(summary), len(slice_text))
     return total / CONTEXT_LIMIT_CHARS > CONTEXT_USAGE_THRESHOLD
 
 
