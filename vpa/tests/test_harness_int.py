@@ -270,6 +270,25 @@ def _port_file_seq(sha, filename, old_string, new_string):
     ]
 
 
+def _skip_seq(sha, filename):
+    """Tool-call sequence for a skipped work item."""
+    wi_id = f"{sha[:8]}:{filename}:0"
+    return [
+        ("record_intent", {"commit_sha": sha, "intent_summary": "Not applicable"}),
+        ("start_work_item", {"commit_sha": sha, "work_item_id": wi_id}),
+        ("append_decision", {
+            "commit_sha": sha, "work_item_id": wi_id,
+            "confidence": "low", "reason": "Not applicable to local repo",
+            "evidence": _EVIDENCE,
+        }),
+        ("complete_work_item", {
+            "commit_sha": sha, "work_item_id": wi_id,
+            "status": "skipped",
+        }),
+        ("signal_done", {"commit_sha": sha}),
+    ]
+
+
 # ── 1. Success path ─────────────────────────────────────────────────────
 
 
@@ -1087,3 +1106,131 @@ class TestContextThreshold(TestCase):
         assert not _over(just_under_total)
         assert _over(just_over_total)
         assert not _over(boundary_total)  # equals threshold, not strictly greater
+
+
+# ── 10. Phase 11 — Controlled dry run output verification ──────────────
+
+
+class TestControlledDryRun(TestCase):
+    """Phase 11: verify on-disk output files and git diff after full promotion.
+    No real model/API calls. Local temporary git repos only."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.upstream, self.local, self.sha, self.old = _create_fixture_repos(self.tmp)
+        self.output = self.tmp / "out"
+        self.output.mkdir()
+
+    def tearDown(self):
+        subprocess.run(["rm", "-rf", str(self.tmp)])
+
+    def test_dry_run_ported_output_files_and_git_diff(self):
+        """Mock agent ports one commit. Verify all output files and git diff."""
+        agent = MockAgent([_porting_seq(self.sha)])
+        validation = MockValidation([
+            [VerifyResult(passed=True, command="make", exit_code=0)],
+        ])
+        run_promotion(
+            upstream_path=str(self.upstream),
+            local_path=str(self.local),
+            upstream_old=self.old,
+            upstream_new=self.sha,
+            local_branch="main",
+            build_cmd="make",
+            fast_test_cmds=["make test"],
+            output_dir=str(self.output),
+            api_key="test-key",
+            agent_runner=agent,
+            validation_runner=validation,
+        )
+
+        # ── ledger.json exists with correct state ──
+        ledger_path = self.output / "ledger.json"
+        assert ledger_path.exists(), "ledger.json not found"
+        ledger = json.loads(ledger_path.read_text())
+        entry = ledger["commits"].get(self.sha)
+        assert entry is not None, f"commit {self.sha[:8]} not in ledger"
+        assert entry["status"] == "ported"
+        assert "file.c" in entry["local_files_modified"]
+        assert entry["validation"]["fast"]["status"] == "passed"
+
+        # ── report.md exists with ported commit and modified file ──
+        report_md = self.output / "report.md"
+        assert report_md.exists(), "report.md not found"
+        md_text = report_md.read_text()
+        assert self.sha[:8] in md_text, f"sha {self.sha[:8]} not in report"
+        assert "file.c" in md_text
+        assert "PASS" in md_text
+
+        # ── report.json preserves commit/work item/evidence/validation structure ──
+        report_json = self.output / "report.json"
+        assert report_json.exists(), "report.json not found"
+        parsed = json.loads(report_json.read_text())
+        assert "meta" in parsed
+        assert parsed["commits"][self.sha]["status"] == "ported"
+        wi = parsed["commits"][self.sha]["work_items"][0]
+        assert wi["status"] == "ported"
+        assert len(wi["decisions"]) == 1
+        assert "evidence" in wi["decisions"][0]
+        assert parsed["fast_validation"][0]["passed"] is True
+
+        # ── git diff HEAD shows real local file modification through ToolHandler ──
+        result = subprocess.run(
+            ["git", "diff", "HEAD"],
+            capture_output=True, text=True,
+            cwd=str(self.local),
+        )
+        diff = result.stdout
+        assert "+int x = 1;" in diff, (
+            f"expected '+int x = 1;' in git diff HEAD, got:\n{diff}"
+        )
+
+    def test_dry_run_ported_and_skipped_commit_report(self):
+        """Two commits: one ported, one skipped. Report shows both correctly."""
+        fixture_dir = self.tmp / "multi"
+        upstream, local, new, old, shas = _create_multi_commit_fixture(fixture_dir)
+        sha_a, sha_b = shas
+
+        agent = MockAgent([
+            _port_file_seq(
+                sha_a, "base.c",
+                "int base = 0;\n",
+                "int base = 0;\nint feat1 = 1;\n",
+            ),
+            _skip_seq(sha_b, "base.c"),
+        ])
+        val = MockValidation([
+            [VerifyResult(passed=True, command="make", exit_code=0)],
+        ])
+        run_promotion(
+            upstream_path=str(upstream),
+            local_path=str(local),
+            upstream_old=old,
+            upstream_new=new,
+            local_branch="main",
+            build_cmd="make",
+            fast_test_cmds=["make test"],
+            output_dir=str(self.output),
+            api_key="test-key",
+            agent_runner=agent,
+            validation_runner=val,
+        )
+
+        # Read output files
+        report_md = (self.output / "report.md").read_text()
+        report_json = json.loads((self.output / "report.json").read_text())
+        ledger = json.loads((self.output / "ledger.json").read_text())
+
+        # Ledger has correct commit states
+        assert ledger["commits"][sha_a]["status"] == "ported"
+        assert ledger["commits"][sha_b]["status"] == "skipped"
+
+        # Report markdown: ported commit and skipped commit both visible
+        assert sha_a[:8] in report_md
+        assert sha_b[:8] in report_md
+        assert "Ported: 1" in report_md
+        assert "Skipped: 1" in report_md
+
+        # Report JSON preserves both commit states
+        assert report_json["commits"][sha_a]["status"] == "ported"
+        assert report_json["commits"][sha_b]["status"] == "skipped"
