@@ -532,3 +532,178 @@ class TestRestartContextCarriesRiskLines(TestCase):
         assert sha_a[:8] in um
         assert "Prior conversation" not in um
         assert "previous messages" not in um.lower()
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Test 4 — Blocked commit counts toward restart threshold
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestBlockedCommitCountsTowardRestart(TestCase):
+    """Agent RuntimeError → blocked; blocked commit counts toward restart.
+
+    Phase 8C: coverage for the RuntimeError → blocked terminal path.
+    max_commits_per_restart=1 proves the blocked commit increments
+    commits_since_restart so the second agent invocation receives
+    restart context."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.upstream, self.local, self.new, self.old, self.shas = \
+            _create_multi_commit_fixture(self.tmp)
+        self.output = self.tmp / "out"
+        self.output.mkdir()
+
+    def tearDown(self):
+        subprocess.run(["rm", "-rf", str(self.tmp)])
+
+    def test_blocked_commit_triggers_restart(self):
+        sha_a, sha_b = self.shas
+        wi_a = _base_wi_id(sha_a)
+
+        # Sequence for commit A: start work item then raise RuntimeError
+        seq_blocked = [
+            ("record_intent", {"commit_sha": sha_a,
+                               "intent_summary": "Port base.c"}),
+            ("start_work_item", {"commit_sha": sha_a,
+                                 "work_item_id": wi_a}),
+            ("nonexistent_tool", {}),  # ToolHandler returns error → MockAgent raises RuntimeError
+        ]
+
+        # Commit B ports from initial state directly to final (A+combined)
+        seq_port_b = _port_file_seq(sha_b, "base.c",
+                                    "int base = 0;\n",
+                                    "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n")
+
+        agent = MockAgent([seq_blocked, seq_port_b])
+        val = MockValidation([
+            [VerifyResult(passed=True, command="make", exit_code=0)],
+        ])
+
+        run_promotion(
+            upstream_path=str(self.upstream),
+            local_path=str(self.local),
+            upstream_old=self.old,
+            upstream_new=self.new,
+            local_branch="main",
+            build_cmd="make",
+            fast_test_cmds=["make test"],
+            output_dir=str(self.output),
+            api_key="test-key",
+            agent_runner=agent,
+            validation_runner=val,
+            max_commits_per_restart=1,
+        )
+
+        ledger = L.load_ledger(self.output / "ledger.json")
+        assert ledger["commits"][sha_a]["status"] == "blocked", \
+            f"Expected blocked, got {ledger['commits'][sha_a]['status']}"
+        assert agent.call_count == 2, f"Expected 2 agent calls, got {agent.call_count}"
+
+        # Commit B's agent call must carry restart context
+        call_b = agent.captured_kwargs[1]
+        assert "Resuming promotion" in call_b["user_message"], \
+            "Commit B should receive restart context"
+        assert "Ledger snapshot" in call_b["user_message"]
+
+        # Commit B ports successfully
+        assert ledger["commits"][sha_b]["status"] == "ported", \
+            f"Expected ported, got {ledger['commits'][sha_b]['status']}"
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Test 5 — Git verify failure counts toward restart threshold
+# ═══════════════════════════════════════════════════════════════════════
+
+class TestGitVerifyFailureCountsTowardRestart(TestCase):
+    """Git verify failure → validation_failed; failed commit counts toward restart.
+
+    Phase 8C: coverage for the git_verify failure terminal path.
+    Agent marks commit ported via complete_work_item but does not actually
+    modify the file, so git_verify returns (False, "none of ...").
+    max_commits_per_restart=1 proves the failure increments
+    commits_since_restart so the next agent invocation receives restart context."""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.upstream, self.local, self.new, self.old, self.shas = \
+            _create_multi_commit_fixture(self.tmp)
+        self.output = self.tmp / "out"
+        self.output.mkdir()
+
+    def tearDown(self):
+        subprocess.run(["rm", "-rf", str(self.tmp)])
+
+    def test_git_verify_failure_triggers_restart(self):
+        sha_a, sha_b = self.shas
+        wi_a = _base_wi_id(sha_a)
+        evidence = [{"file": "base.c", "line": 1, "snippet": "int base = 0;"}]
+
+        # Sequence for commit A: port work item WITHOUT actually editing the file
+        # complete_work_item("ported") adds base.c to local_files_modified,
+        # but since edit_file was never called, git diff HEAD shows no change
+        seq_git_fail = [
+            ("record_intent", {"commit_sha": sha_a,
+                               "intent_summary": "Port base.c"}),
+            ("start_work_item", {"commit_sha": sha_a,
+                                 "work_item_id": wi_a}),
+            ("append_decision", {
+                "commit_sha": sha_a, "work_item_id": wi_a,
+                "confidence": "high", "reason": "direct patch",
+                "evidence": evidence,
+            }),
+            ("complete_work_item", {
+                "commit_sha": sha_a, "work_item_id": wi_a,
+                "status": "ported", "method": "direct_patch",
+            }),
+            ("signal_done", {"commit_sha": sha_a}),
+        ]
+
+        # Commit B ports from initial state directly to final (A+combined)
+        seq_port_b = _port_file_seq(sha_b, "base.c",
+                                    "int base = 0;\n",
+                                    "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n")
+
+        agent = MockAgent([seq_git_fail, seq_port_b])
+        val = MockValidation([
+            [VerifyResult(passed=True, command="make", exit_code=0)],
+        ])
+
+        run_promotion(
+            upstream_path=str(self.upstream),
+            local_path=str(self.local),
+            upstream_old=self.old,
+            upstream_new=self.new,
+            local_branch="main",
+            build_cmd="make",
+            fast_test_cmds=["make test"],
+            output_dir=str(self.output),
+            api_key="test-key",
+            agent_runner=agent,
+            validation_runner=val,
+            max_commits_per_restart=1,
+        )
+
+        ledger = L.load_ledger(self.output / "ledger.json")
+        a_entry = ledger["commits"][sha_a]
+
+        # Commit A: git verify failure → validation_failed
+        assert a_entry["status"] == "validation_failed", \
+            f"Expected validation_failed, got {a_entry['status']}"
+        assert a_entry["work_items"][0]["status"] == "validation_failed"
+
+        # Verify the git_verify failure was recorded in validation
+        fast_v = a_entry.get("validation", {}).get("fast", {})
+        assert fast_v.get("status") == "failed"
+        assert "git diff HEAD" in fast_v.get("command", "")
+
+        assert agent.call_count == 2, f"Expected 2 agent calls, got {agent.call_count}"
+
+        # Commit B's agent call must carry restart context
+        call_b = agent.captured_kwargs[1]
+        assert "Resuming promotion" in call_b["user_message"], \
+            "Commit B should receive restart context"
+        assert "Ledger snapshot" in call_b["user_message"]
+
+        # Commit B ports successfully
+        assert ledger["commits"][sha_b]["status"] == "ported", \
+            f"Expected ported, got {ledger['commits'][sha_b]['status']}"
