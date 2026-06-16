@@ -14,6 +14,9 @@ def generate_summary(ledger, fast_results, slow_results):
     validation_failed = sum(
         1 for c in commits.values() if c["status"] == "validation_failed"
     )
+    final_manual = sum(
+        1 for c in commits.values() if c["status"] == "final_manual"
+    )
     partially = sum(
         1 for c in commits.values() if c["status"] == "partially_ported"
     )
@@ -42,7 +45,8 @@ def generate_summary(ledger, fast_results, slow_results):
         f"- Total upstream commits: {total}",
         f"- Ported: {ported}  |  Skipped: {skipped}  |  Needs Human: {needs_human}"
         f"  |  Blocked: {blocked}",
-        f"- Validation Failed: {validation_failed}  |  Partially Ported: {partially}",
+        f"- Validation Failed: {validation_failed}  |  Final Manual: {final_manual}"
+        f"  |  Partially Ported: {partially}",
         f"- Fast validation: {fast_status} ({_count_failures(fast_results)} failures)",
         f"- Slow validation: {slow_status}",
         f"- Completed at: {meta.get('updated_at', datetime.now(UTC).isoformat())}",
@@ -71,7 +75,9 @@ def generate_summary(ledger, fast_results, slow_results):
     manual_entries = [
         (sha, entry)
         for sha, entry in commits.items()
-        if entry["status"] in ("needs_human", "partially_ported", "validation_failed")
+        if entry["status"] in (
+            "needs_human", "partially_ported", "validation_failed", "final_manual",
+        )
     ]
     if manual_entries:
         for sha, entry in sorted(manual_entries):

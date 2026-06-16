@@ -417,6 +417,20 @@ class TestSignalDone(TestCase):
         self.assertFalse(result["done"])
         self.assertIn("not in terminal state", result.get("error", ""))
 
+    def test_signal_done_accepts_final_manual(self):
+        handler, tmp, ledger, _ = _make_handler()
+        sha = _TARGET_SHA
+        L.init_commit_entry(ledger, sha, "test", ["src/test.c"])
+        L.init_work_items(ledger, sha, [
+            {"id": f"{sha[:8]}:src/test.c:0", "kind": "file",
+             "upstream_file": "src/test.c", "local_file": "src/test.c"},
+        ])
+        wi = ledger["commits"][sha]["work_items"][0]
+        L.start_work_item(ledger, sha, wi["id"])
+        L.complete_work_item(ledger, sha, wi["id"], "final_manual")
+        result = handler.dispatch("signal_done", {"commit_sha": sha})
+        self.assertTrue(result["done"])
+
     def test_unknown_commit_still_succeeds(self):
         handler, _, _, _ = _make_handler()
         result = handler.dispatch("signal_done", {"commit_sha": "unknown"})
@@ -460,6 +474,39 @@ class TestSignalDone(TestCase):
         })
         self.assertTrue(result["manual_required"])
         self.assertEqual(wi["status"], "needs_human")
+
+    def test_request_human_does_not_stop_agent(self):
+        """After request_human, the agent can continue processing
+        and call signal_done on the same commit. This is intentional
+        — request_human marks one item but lets others proceed."""
+        handler, tmp, ledger, _ = _make_handler()
+        sha = _TARGET_SHA
+        L.init_commit_entry(ledger, sha, "test", ["src/a.c", "src/b.c"])
+        L.init_work_items(ledger, sha, [
+            {"id": f"{sha[:8]}:src/a.c:0", "kind": "file",
+             "upstream_file": "src/a.c", "local_file": "src/a.c"},
+            {"id": f"{sha[:8]}:src/b.c:1", "kind": "file",
+             "upstream_file": "src/b.c", "local_file": "src/b.c"},
+        ])
+        wi0 = ledger["commits"][sha]["work_items"][0]
+        wi1 = ledger["commits"][sha]["work_items"][1]
+        # Start both items
+        L.start_work_item(ledger, sha, wi0["id"])
+        L.start_work_item(ledger, sha, wi1["id"])
+        # Request human for one
+        rh = handler.dispatch("request_human", {
+            "commit_sha": sha, "work_item_id": wi0["id"],
+            "reason": "Complex conflict",
+        })
+        self.assertTrue(rh["manual_required"])
+        # Complete the other
+        L.append_decision(ledger, sha, wi1["id"], "high", "safe port", [
+            {"file": "src/b.c", "line": 1, "snippet": "int y = 2;"},
+        ])
+        L.complete_work_item(ledger, sha, wi1["id"], "ported", method="direct_patch")
+        # signal_done should still pass (needs_human + ported both terminal)
+        result = handler.dispatch("signal_done", {"commit_sha": sha})
+        self.assertTrue(result["done"])
 
     def test_edit_file_dry_run_verified_set_isolation(self):
         handler, tmp, ledger, _ = _make_handler()

@@ -112,8 +112,8 @@ def run_promotion(
         sha = sl.commit_sha
         entry = ledger["commits"].get(sha, {})
 
-        # Skip terminal commits
-        if entry.get("status") in ("ported", "skipped", "needs_human", "blocked"):
+        # Skip terminal commits (never re-process)
+        if entry.get("status") in L.HARNESS_SKIP_STATUSES:
             continue
 
         # Compute work item IDs for this slice (always needed)
@@ -252,10 +252,9 @@ def run_promotion(
                     L.write_ledger(ledger_path, ledger)
                     continue
 
-        # Track restart
-        terminal_statuses = ("ported", "skipped", "needs_human")
+        # Track restart (terminal means done, even if unsuccessful)
         if sl.level == SliceLevel.COMMIT or (
-            sha not in processed_commits and entry.get("status") in terminal_statuses
+            sha not in processed_commits and entry.get("status") in L.HARNESS_SKIP_STATUSES
         ):
             processed_commits.add(sha)
             commits_since_restart += 1
@@ -445,10 +444,8 @@ def _mark_items_validation_failed(ledger, commit_sha, work_items, summary):
 
 def _all_work_items_terminal(entry):
     """True when every work item in the commit has reached a terminal status."""
-    terminal = {"ported", "skipped", "blocked", "needs_human", "validation_failed",
-                "final_manual"}
     for wi in entry.get("work_items", []):
-        if wi["status"] not in terminal:
+        if wi["status"] not in L.TERMINAL_WORK_ITEM_STATUSES:
             return False
     return bool(entry.get("work_items"))
 

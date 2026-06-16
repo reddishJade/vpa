@@ -727,12 +727,8 @@ class ToolHandler:
     def _tool_signal_done(self, commit_sha):
         entry = self.ledger.get("commits", {}).get(commit_sha)
         if entry:
-            terminal = {
-                "ported", "skipped", "blocked", "needs_human",
-                "validation_failed", "final_manual",
-            }
             for wi in entry.get("work_items", []):
-                if wi["status"] not in terminal:
+                if wi["status"] not in L.TERMINAL_WORK_ITEM_STATUSES:
                     return {
                         "done": False,
                         "error": (

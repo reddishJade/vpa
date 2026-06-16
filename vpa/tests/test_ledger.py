@@ -101,6 +101,26 @@ class TestStateTransitions(TestCase):
         L.complete_work_item(ld, sha, wi["id"], "validation_failed")
         self.assertEqual(wi["status"], "validation_failed")
 
+    def test_final_manual_is_valid_completion_status(self):
+        ld, _ = _make_ledger()
+        sha = _commit(ld)
+        wi = ld["commits"][sha]["work_items"][0]
+        L.start_work_item(ld, sha, wi["id"])
+        L.complete_work_item(ld, sha, wi["id"], "final_manual")
+        self.assertEqual(wi["status"], "final_manual")
+
+    def test_final_manual_is_terminal(self):
+        ld, _ = _make_ledger()
+        sha = _commit(ld)
+        wi = ld["commits"][sha]["work_items"][0]
+        L.start_work_item(ld, sha, wi["id"])
+        L.complete_work_item(ld, sha, wi["id"], "final_manual")
+        # Cannot transition out of final_manual
+        with self.assertRaises(ValueError):
+            L.start_work_item(ld, sha, wi["id"])
+        with self.assertRaises(ValueError):
+            L.complete_work_item(ld, sha, wi["id"], "ported")
+
     def test_terminal_state_rejects_backward(self):
         ld, _ = _make_ledger()
         sha = _commit(ld)
@@ -144,22 +164,19 @@ class TestStateTransitions(TestCase):
         with self.assertRaises(ValueError):
             L.complete_work_item(ld, sha, wi["id"], "in_progress")
 
-    def test_start_from_needs_human_is_allowed_by_transition_table(self):
-        """VALID_TRANSITIONS permits needs_human → in_progress.
+    def test_start_from_needs_human_rejected(self):
+        """needs_human → in_progress is now gated by the transition table.
 
-        The DESIGN.md says harness gatekeeps this path (only reset_for_retry
-        should use it), but the transition table itself does not reject it.
-        Full harness-level enforcement is deferred.
+        Only reset_for_retry can move items out of needs_human (to pending).
+        Direct needs_human → in_progress raises ValueError.
         """
         ld, _ = _make_ledger()
         sha = _commit(ld)
         wi = ld["commits"][sha]["work_items"][0]
         L.start_work_item(ld, sha, wi["id"])
         L.complete_work_item(ld, sha, wi["id"], "needs_human")
-        # Current code allows this transition
-        L.start_work_item(ld, sha, wi["id"])
-        self.assertEqual(wi["status"], "in_progress")
-        self.assertEqual(wi["attempt_count"], 2)
+        with self.assertRaises(ValueError):
+            L.start_work_item(ld, sha, wi["id"])
 
 
 # ── Append-only decisions ───────────────────────────────────────────────
@@ -307,6 +324,50 @@ class TestCommitStatusDerivation(TestCase):
         L.complete_work_item(ld, sha, wi["id"], "blocked")
         self.assertEqual(ld["commits"][sha]["status"], "blocked")
 
+    def test_all_final_manual(self):
+        ld, _ = _make_ledger()
+        sha = _commit(ld)
+        wi = ld["commits"][sha]["work_items"][0]
+        L.start_work_item(ld, sha, wi["id"])
+        L.complete_work_item(ld, sha, wi["id"], "final_manual")
+        self.assertEqual(ld["commits"][sha]["status"], "final_manual")
+
+    def test_final_manual_overrides_validation_failed(self):
+        ld, _ = _make_ledger()
+        sha = "a" * 40
+        L.init_commit_entry(ld, sha, "test", ["src/foo.c", "src/bar.c"])
+        L.init_work_items(ld, sha, [
+            {"id": f"{sha[:8]}:src/foo.c:0", "kind": "file",
+             "upstream_file": "src/foo.c", "local_file": "src/foo.c"},
+            {"id": f"{sha[:8]}:src/bar.c:1", "kind": "file",
+             "upstream_file": "src/bar.c", "local_file": "src/bar.c"},
+        ])
+        items = ld["commits"][sha]["work_items"]
+        L.start_work_item(ld, sha, items[0]["id"])
+        L.complete_work_item(ld, sha, items[0]["id"], "final_manual")
+        L.start_work_item(ld, sha, items[1]["id"])
+        L.complete_work_item(ld, sha, items[1]["id"], "validation_failed")
+        # final_manual should take priority over validation_failed
+        self.assertEqual(ld["commits"][sha]["status"], "final_manual")
+
+    def test_final_manual_overrides_needs_human(self):
+        ld, _ = _make_ledger()
+        sha = "a" * 40
+        L.init_commit_entry(ld, sha, "test", ["src/foo.c", "src/bar.c"])
+        L.init_work_items(ld, sha, [
+            {"id": f"{sha[:8]}:src/foo.c:0", "kind": "file",
+             "upstream_file": "src/foo.c", "local_file": "src/foo.c"},
+            {"id": f"{sha[:8]}:src/bar.c:1", "kind": "file",
+             "upstream_file": "src/bar.c", "local_file": "src/bar.c"},
+        ])
+        items = ld["commits"][sha]["work_items"]
+        L.start_work_item(ld, sha, items[0]["id"])
+        L.complete_work_item(ld, sha, items[0]["id"], "final_manual")
+        L.start_work_item(ld, sha, items[1]["id"])
+        L.complete_work_item(ld, sha, items[1]["id"], "needs_human")
+        # final_manual should take priority over needs_human
+        self.assertEqual(ld["commits"][sha]["status"], "final_manual")
+
     def test_in_progress_higher_priority_than_partial(self):
         ld, _ = _make_ledger()
         sha = "a" * 40
@@ -364,6 +425,23 @@ class TestLedgerEdgeCases(TestCase):
         sha = _commit(ld)
         with self.assertRaises(KeyError):
             L.start_work_item(ld, sha, "nonexistent_id")
+
+    def test_canonical_sets_include_all_terminal_statuses(self):
+        """TERMINAL_WORK_ITEM_STATUSES and HARNESS_SKIP_STATUSES
+        must include all statuses that represent done/non-reprocessable states.
+        """
+        self.assertIn("final_manual", L.TERMINAL_WORK_ITEM_STATUSES)
+        self.assertIn("validation_failed", L.HARNESS_SKIP_STATUSES)
+        self.assertIn("final_manual", L.HARNESS_SKIP_STATUSES)
+        # HARNESS_SKIP_STATUSES must be a superset of TERMINAL in practice
+        for s in L.TERMINAL_WORK_ITEM_STATUSES:
+            self.assertIn(s, L.HARNESS_SKIP_STATUSES,
+                          f"{s} in TERMINAL_WORK_ITEM_STATUSES but not HARNESS_SKIP_STATUSES")
+
+    def test_validation_failed_in_skip_set(self):
+        """validation_failed must be in HARNESS_SKIP_STATUSES so the
+        main loop does not re-process failed commits."""
+        self.assertIn("validation_failed", L.HARNESS_SKIP_STATUSES)
 
     def test_session_meta_has_required_fields(self):
         meta = L.init_session_meta(

@@ -18,6 +18,19 @@ from datetime import UTC, datetime
 
 # ── State machine ──────────────────────────────────────────────────────────
 
+# Canonical status sets — single source of truth
+# Work item statuses that are considered "done" (no further agent action needed)
+TERMINAL_WORK_ITEM_STATUSES = frozenset({
+    "ported", "skipped", "blocked", "needs_human",
+    "validation_failed", "final_manual",
+})
+
+# Commit statuses that the harness main loop should skip (never re-process)
+HARNESS_SKIP_STATUSES = frozenset({
+    "ported", "skipped", "needs_human", "blocked",
+    "validation_failed", "final_manual",
+})
+
 VALID_TRANSITIONS = {
     "pending": {
         "in_progress",
@@ -29,6 +42,7 @@ VALID_TRANSITIONS = {
         "needs_human",
         "blocked",
         "validation_failed",
+        "final_manual",
     },
     "partially_ported": {
         "ported",
@@ -37,14 +51,16 @@ VALID_TRANSITIONS = {
     "validation_failed": {
         "needs_human",
     },
-    "needs_human": {
-        "in_progress",  # only via hint injection, harness gatekeeps
-    },
-    # Terminal states: ported, skipped, blocked — no outgoing transitions
+    # needs_human must go through reset_for_retry → pending → in_progress
+    # Direct needs_human → in_progress is NOT allowed
+    # (harness gatekeeps with reset_for_retry)
+    "final_manual": set(),
+    # Terminal states: ported, skipped, blocked, final_manual — no outgoing
 }
 
 ALLOWED_COMPLETION_STATUSES = {
-    "ported", "skipped", "needs_human", "blocked", "validation_failed"
+    "ported", "skipped", "needs_human", "blocked",
+    "validation_failed", "final_manual",
 }
 
 
@@ -136,9 +152,8 @@ def record_intent_summary(ledger, commit_sha, intent_summary):
 
 def _commit_has_work_items(entry):
     """Check if any work items are not in terminal state."""
-    terminal = {"ported", "skipped", "blocked"}
     for wi in entry.get("work_items", []):
-        if wi["status"] not in terminal:
+        if wi["status"] not in TERMINAL_WORK_ITEM_STATUSES:
             return False
     return bool(entry.get("work_items"))
 
@@ -285,10 +300,12 @@ def _derive_commit_status(entry):
             entry["status"] = "blocked"
         else:
             entry["status"] = "partially_ported"  # some ported, rest skipped
-    elif any(s == "needs_human" for s in wi_statuses):
-        entry["status"] = "needs_human"
+    elif any(s == "final_manual" for s in wi_statuses):
+        entry["status"] = "final_manual"
     elif any(s == "validation_failed" for s in wi_statuses):
         entry["status"] = "validation_failed"
+    elif any(s == "needs_human" for s in wi_statuses):
+        entry["status"] = "needs_human"
     elif any(s == "blocked" for s in wi_statuses):
         entry["status"] = "blocked"
     elif any(s == "in_progress" for s in wi_statuses):
