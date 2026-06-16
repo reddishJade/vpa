@@ -4,7 +4,18 @@ import sys
 from .harness import retry_with_hint, run_promotion
 
 
-def main():
+def main(argv=None, agent_runner=None, validation_runner=None):
+    """Run VPA CLI.
+
+    Parameters
+    ----------
+    argv : list[str] | None
+        CLI arguments (default: sys.argv[1:]).
+    agent_runner : callable | None
+        Inject mock agent runner for testing (default: run_agent).
+    validation_runner : callable | None
+        Inject mock validation runner for testing (default: run_fast_validation).
+    """
     parser = argparse.ArgumentParser(
         description="vpa — version promotion agent",
     )
@@ -60,7 +71,7 @@ def main():
     retry_p.add_argument("--local-name", default="local")
     retry_p.add_argument("--arch", default="<arch>")
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.command == "run":
         summary, _ = run_promotion(
@@ -80,6 +91,8 @@ def main():
             local_name=args.local_name,
             arch=args.arch,
             max_commits_per_restart=args.max_commits_per_restart,
+            agent_runner=agent_runner,
+            validation_runner=validation_runner,
         )
         print(summary)
 
