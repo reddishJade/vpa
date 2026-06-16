@@ -114,6 +114,8 @@ def main(argv=None, agent_runner=None, validation_runner=None):
             upstream_name=args.upstream_name,
             local_name=args.local_name,
             arch=args.arch,
+            agent_runner=agent_runner,
+            validation_runner=validation_runner,
         )
         if result:
             print(f"Retry succeeded: {result['status']}")

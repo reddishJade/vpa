@@ -320,8 +320,15 @@ def retry_with_hint(
     upstream_name="upstream",
     local_name="local",
     arch="<arch>",
+    agent_runner=None,
+    validation_runner=None,
 ):
     """Retry a needs_human commit with a human-provided hint. One retry only."""
+    if agent_runner is None:
+        agent_runner = run_agent
+    if validation_runner is None:
+        validation_runner = run_fast_validation
+
     api_key = api_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("No API key")
@@ -353,6 +360,8 @@ def retry_with_hint(
     diff = get_commit_diff(upstream_path, commit_sha)
     files = get_commit_files(upstream_path, commit_sha)
 
+    vresults = []
+
     wi_ids = [
         wi["id"] for wi in entry.get("work_items", [])
         if wi["status"] == "pending"
@@ -377,7 +386,7 @@ def retry_with_hint(
     )
 
     try:
-        run_agent(
+        agent_runner(
             system_prompt=sp,
             user_message=um,
             tools=TOOL_DEFINITIONS,
@@ -389,6 +398,7 @@ def retry_with_hint(
     except RuntimeError:
         _mark_items_blocked(ledger, commit_sha, "Agent error during retry")
         L.write_ledger(ledger_path, ledger)
+        _regenerate_reports(output_dir, ledger, vresults)
         return None
 
     ledger = L.load_ledger(ledger_path)
@@ -399,10 +409,11 @@ def retry_with_hint(
     entry = ledger["commits"].get(commit_sha, {})
     # If any item transitioned to final_manual, commit is terminal
     if any(wi["status"] == "final_manual" for wi in entry.get("work_items", [])):
+        _regenerate_reports(output_dir, ledger, vresults)
         return None
 
     # Fast validation
-    vresults = run_fast_validation(build_cmd, fast_test_cmds, local_path)
+    vresults = validation_runner(build_cmd, fast_test_cmds, local_path)
     if validation_failed(vresults):
         _mark_items_validation_failed(
             ledger, commit_sha,
@@ -410,10 +421,12 @@ def retry_with_hint(
             vresults,
         )
         L.write_ledger(ledger_path, ledger)
+        _regenerate_reports(output_dir, ledger, vresults)
         return None
 
     L.record_validation(ledger, commit_sha, "fast", {"status": "passed"})
     L.write_ledger(ledger_path, ledger)
+    _regenerate_reports(output_dir, ledger, vresults)
     return entry
 
 
@@ -543,3 +556,14 @@ def _mark_items_blocked(ledger, commit_sha, reason):
                 L.complete_work_item(ledger, commit_sha, wi["id"], "blocked")
             except (KeyError, ValueError):
                 wi["status"] = "blocked"
+
+
+def _regenerate_reports(output_dir, ledger, fast_results):
+    """Regenerate report.md and report.json from current ledger state."""
+    out_dir = Path(output_dir)
+    summary = generate_summary(ledger, fast_results, [])
+    json_output = generate_json_output(ledger, fast_results, [])
+    with open(out_dir / "report.md", "w") as f:
+        f.write(summary)
+    with open(out_dir / "report.json", "w") as f:
+        f.write(json_output)

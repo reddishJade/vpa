@@ -8,6 +8,7 @@ to avoid duplication across test files.
 import subprocess
 from pathlib import Path
 
+from vpa import ledger as L
 from vpa.verify import VerifyResult
 
 _EVIDENCE = [{"file": "file.c", "line": 1, "snippet": "int x = 1;"}]
@@ -130,6 +131,27 @@ def create_multi_commit_fixture(base_dir):
     _git_commit(local, "local initial")
 
     return upstream, local, sha_b, old_sha, [sha_a, sha_b]
+
+
+def create_needs_human_fixture(output_dir, upstream, local, sha, old):
+    """Build a needs_human ledger state for sha using existing fixture repos.
+
+    The fixture repos must already exist (via create_fixture_repos).
+    """
+    meta = L.init_session_meta(
+        "upstream", old, sha, "local", "main", "arch",
+        str(upstream), str(local), "make", ["test"], [],
+    )
+    ledger, ledger_path = L.init_ledger(meta, output_dir)
+    L.init_commit_entry(ledger, sha, "Add x", ["file.c"])
+    L.init_work_items(ledger, sha, [
+        {"id": wi_id(sha), "kind": "file",
+         "upstream_file": "file.c", "local_file": "file.c"},
+    ])
+    wi = ledger["commits"][sha]["work_items"][0]
+    L.start_work_item(ledger, sha, wi["id"])
+    L.complete_work_item(ledger, sha, wi["id"], "needs_human")
+    L.write_ledger(ledger_path, ledger)
 
 
 def wi_id(sha):
