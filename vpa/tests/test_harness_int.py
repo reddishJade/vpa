@@ -15,279 +15,18 @@ from unittest import TestCase
 
 from vpa import ledger as L
 from vpa.harness import run_promotion
+from vpa.tests.fixtures import (
+    MockAgent,
+    MockValidation,
+    create_fixture_repos,
+    create_multi_commit_fixture,
+    port_file_seq,
+    porting_seq,
+    request_human_seq,
+    skip_seq,
+    wi_id,
+)
 from vpa.verify import VerifyResult
-
-_EVIDENCE = [{"file": "file.c", "line": 1, "snippet": "int x = 1;"}]
-
-
-# ── Mock helpers ────────────────────────────────────────────────────────
-
-
-class MockAgent:
-    """Predetermined tool-call sequences. One sequence consumed per call."""
-
-    def __init__(self, sequences):
-        self.sequences = list(sequences)
-        self.call_count = 0
-        self.captured_kwargs = []
-
-    def __call__(self, **kwargs):
-        self.call_count += 1
-        self.captured_kwargs.append(kwargs)
-        if not self.sequences:
-            return ("No more sequences.", [])
-        on_tool_call = kwargs["on_tool_call"]
-        seq = self.sequences.pop(0)
-        for name, args in seq:
-            result = on_tool_call(name, args)
-            if isinstance(result, dict) and "error" in result:
-                raise RuntimeError(
-                    f"Tool '{name}' error: {result['error']}"
-                )
-        return ("Mock agent done.", [])
-
-
-class MockValidation:
-    """Predetermined verification results. One list consumed per call."""
-
-    def __init__(self, result_lists):
-        self.result_lists = list(result_lists)
-        self.call_count = 0
-
-    def __call__(self, build_cmd, test_cmds, local_repo, timeout=120):
-        self.call_count += 1
-        if self.result_lists:
-            return self.result_lists.pop(0)
-        return [VerifyResult(passed=True, command="mock", exit_code=0)]
-
-
-# ── Fixture helpers ─────────────────────────────────────────────────────
-
-
-def _create_fixture_repos(base_dir):
-    """Create upstream (2 commits) and local (1 commit) tiny git repos.
-
-    Upstream commit 1: creates file.c with one line.
-    Upstream commit 2: adds another line (the commit to port).
-    Local commit 1:   same content as upstream commit 1.
-    """
-    upstream = Path(base_dir) / "upstream"
-    local = Path(base_dir) / "local"
-
-    for d in [upstream, local]:
-        d.mkdir(parents=True)
-        subprocess.run(["git", "init"], cwd=d, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=d, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=d, capture_output=True,
-        )
-
-    # Upstream commit 1
-    (upstream / "file.c").write_text("int y = 2;\n")
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "initial"], cwd=upstream, capture_output=True,
-    )
-    old_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    # Upstream commit 2 (the one to port)
-    (upstream / "file.c").write_text("int x = 1;\nint y = 2;\n")
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add x feature"],
-        cwd=upstream, capture_output=True,
-    )
-    new_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    # Local commit 1  (same as upstream initial)
-    (local / "file.c").write_text("int y = 2;\n")
-    subprocess.run(["git", "add", "."], cwd=local, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "local initial"],
-        cwd=local, capture_output=True,
-    )
-
-    return upstream, local, new_sha, old_sha
-
-
-def _wi_id(sha):
-    return f"{sha[:8]}:file.c:0"
-
-
-def _porting_seq(sha):
-    """Full porting tool-call sequence: intent → start → decide → edit → complete → done."""
-    return [
-        ("record_intent", {"commit_sha": sha, "intent_summary": "Add x"}),
-        ("start_work_item", {"commit_sha": sha, "work_item_id": _wi_id(sha)}),
-        ("append_decision", {
-            "commit_sha": sha, "work_item_id": _wi_id(sha),
-            "confidence": "high", "reason": "direct patch",
-            "evidence": _EVIDENCE,
-        }),
-        ("edit_file", {
-            "path": "file.c", "commit_sha": sha,
-            "old_string": "int y = 2;",
-            "new_string": "int x = 1;\nint y = 2;",
-            "dry_run": True,
-        }),
-        ("edit_file", {
-            "path": "file.c", "commit_sha": sha,
-            "old_string": "int y = 2;",
-            "new_string": "int x = 1;\nint y = 2;",
-            "dry_run": False,
-        }),
-        ("complete_work_item", {
-            "commit_sha": sha, "work_item_id": _wi_id(sha),
-            "status": "ported", "method": "direct_patch",
-        }),
-        ("signal_done", {"commit_sha": sha}),
-    ]
-
-
-def _request_human_seq(sha):
-    """Human-intervention tool-call sequence: intent → start → request → done."""
-    return [
-        ("record_intent", {"commit_sha": sha, "intent_summary": "Add x"}),
-        ("start_work_item", {"commit_sha": sha, "work_item_id": _wi_id(sha)}),
-        ("request_human", {
-            "commit_sha": sha, "work_item_id": _wi_id(sha),
-            "reason": "Complex conflict at file.c:1",
-        }),
-        ("signal_done", {"commit_sha": sha}),
-    ]
-
-
-# ── Multi-commit fixture helpers ────────────────────────────────────────
-
-
-def _create_multi_commit_fixture(base_dir):
-    """Create upstream (3 commits: initial + 2 porting) and local (matching initial).
-
-    Each porting commit modifies base.c sequentially.
-    Returns (upstream, local, new_sha, old_sha, [sha_a, sha_b]).
-    """
-    upstream = Path(base_dir) / "upstream"
-    local = Path(base_dir) / "local"
-
-    for d in [upstream, local]:
-        d.mkdir(parents=True)
-        subprocess.run(["git", "init"], cwd=d, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=d, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=d, capture_output=True,
-        )
-
-    # Upstream initial commit
-    (upstream / "base.c").write_text("int base = 0;\n")
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "initial"], cwd=upstream, capture_output=True,
-    )
-    old_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    # Upstream commit A: adds feat1
-    (upstream / "base.c").write_text("int base = 0;\nint feat1 = 1;\n")
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add feature 1"],
-        cwd=upstream, capture_output=True,
-    )
-    sha_a = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    # Upstream commit B: adds feat2
-    (upstream / "base.c").write_text(
-        "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"
-    )
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add feature 2"],
-        cwd=upstream, capture_output=True,
-    )
-    sha_b = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    # Local commit (same as upstream initial)
-    (local / "base.c").write_text("int base = 0;\n")
-    subprocess.run(["git", "add", "."], cwd=local, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "local initial"],
-        cwd=local, capture_output=True,
-    )
-
-    return upstream, local, sha_b, old_sha, [sha_a, sha_b]
-
-
-def _port_file_seq(sha, filename, old_string, new_string):
-    """Porting sequence that edits a single file via edit_file."""
-    wi_id = f"{sha[:8]}:{filename}:0"
-    return [
-        ("record_intent", {"commit_sha": sha, "intent_summary": f"Port {filename}"}),
-        ("start_work_item", {"commit_sha": sha, "work_item_id": wi_id}),
-        ("append_decision", {
-            "commit_sha": sha, "work_item_id": wi_id,
-            "confidence": "high", "reason": "direct patch",
-            "evidence": _EVIDENCE,
-        }),
-        ("edit_file", {
-            "path": filename, "commit_sha": sha,
-            "old_string": old_string,
-            "new_string": new_string,
-            "dry_run": True,
-        }),
-        ("edit_file", {
-            "path": filename, "commit_sha": sha,
-            "old_string": old_string,
-            "new_string": new_string,
-            "dry_run": False,
-        }),
-        ("complete_work_item", {
-            "commit_sha": sha, "work_item_id": wi_id,
-            "status": "ported", "method": "direct_patch",
-        }),
-        ("signal_done", {"commit_sha": sha}),
-    ]
-
-
-def _skip_seq(sha, filename):
-    """Tool-call sequence for a skipped work item."""
-    wi_id = f"{sha[:8]}:{filename}:0"
-    return [
-        ("record_intent", {"commit_sha": sha, "intent_summary": "Not applicable"}),
-        ("start_work_item", {"commit_sha": sha, "work_item_id": wi_id}),
-        ("append_decision", {
-            "commit_sha": sha, "work_item_id": wi_id,
-            "confidence": "low", "reason": "Not applicable to local repo",
-            "evidence": _EVIDENCE,
-        }),
-        ("complete_work_item", {
-            "commit_sha": sha, "work_item_id": wi_id,
-            "status": "skipped",
-        }),
-        ("signal_done", {"commit_sha": sha}),
-    ]
-
 
 # ── 1. Success path ─────────────────────────────────────────────────────
 
@@ -297,7 +36,7 @@ class TestHarnessSuccessPath(TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.upstream, self.local, self.sha, self.old = _create_fixture_repos(self.tmp)
+        self.upstream, self.local, self.sha, self.old = create_fixture_repos(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -305,7 +44,7 @@ class TestHarnessSuccessPath(TestCase):
         subprocess.run(["rm", "-rf", str(self.tmp)])
 
     def test_ported_commit(self):
-        agent = MockAgent([_porting_seq(self.sha)])
+        agent = MockAgent([porting_seq(self.sha)])
         validation = MockValidation([
             [VerifyResult(passed=True, command="make", exit_code=0)],
         ])
@@ -343,7 +82,7 @@ class TestHarnessSuccessPath(TestCase):
         assert parsed["commits"][self.sha]["status"] == "ported"
 
     def test_fast_validation_pass_recorded(self):
-        agent = MockAgent([_porting_seq(self.sha)])
+        agent = MockAgent([porting_seq(self.sha)])
         validation = MockValidation([
             [VerifyResult(passed=True, command="make", exit_code=0)],
         ])
@@ -374,7 +113,7 @@ class TestHarnessRequestHumanPath(TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.upstream, self.local, self.sha, self.old = _create_fixture_repos(self.tmp)
+        self.upstream, self.local, self.sha, self.old = create_fixture_repos(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -382,7 +121,7 @@ class TestHarnessRequestHumanPath(TestCase):
         subprocess.run(["rm", "-rf", str(self.tmp)])
 
     def test_needs_human_no_validation(self):
-        agent = MockAgent([_request_human_seq(self.sha)])
+        agent = MockAgent([request_human_seq(self.sha)])
         validation = MockValidation([
             [VerifyResult(passed=True, command="make", exit_code=0)],
         ])
@@ -409,7 +148,7 @@ class TestHarnessRequestHumanPath(TestCase):
         assert "needs_human" in summary.lower()
 
     def test_subsequent_run_skips_needs_human(self):
-        agent1 = MockAgent([_request_human_seq(self.sha)])
+        agent1 = MockAgent([request_human_seq(self.sha)])
         validation1 = MockValidation([])
         run_promotion(
             upstream_path=str(self.upstream),
@@ -455,7 +194,7 @@ class TestHarnessValidationFailedPath(TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.upstream, self.local, self.sha, self.old = _create_fixture_repos(self.tmp)
+        self.upstream, self.local, self.sha, self.old = create_fixture_repos(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -464,7 +203,7 @@ class TestHarnessValidationFailedPath(TestCase):
 
     def test_validation_failed(self):
         agent = MockAgent([
-            _porting_seq(self.sha),
+            porting_seq(self.sha),
             [],
         ])
         fail_result = [VerifyResult(
@@ -498,7 +237,7 @@ class TestHarnessValidationFailedPath(TestCase):
     def test_validation_failure_records_command_exit_code_summary(self):
         """Fast validation failure must record command, exit_code, and summary."""
         agent = MockAgent([
-            _porting_seq(self.sha),
+            porting_seq(self.sha),
             [],
         ])
         fail_result = [VerifyResult(
@@ -526,7 +265,7 @@ class TestHarnessValidationFailedPath(TestCase):
         assert "build error" in v["summary"]
 
     def test_subsequent_run_skips_validation_failed(self):
-        agent1 = MockAgent([_porting_seq(self.sha), []])
+        agent1 = MockAgent([porting_seq(self.sha), []])
         fail = [VerifyResult(passed=False, command="make", exit_code=1)]
         validation1 = MockValidation([fail, fail])
         run_promotion(
@@ -572,7 +311,7 @@ class TestHarnessFinalManualPath(TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.upstream, self.local, self.sha, self.old = _create_fixture_repos(self.tmp)
+        self.upstream, self.local, self.sha, self.old = create_fixture_repos(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -587,7 +326,7 @@ class TestHarnessFinalManualPath(TestCase):
         ledger, ledger_path = L.init_ledger(meta, self.output)
         L.init_commit_entry(ledger, self.sha, "Add x", ["file.c"])
         L.init_work_items(ledger, self.sha, [
-            {"id": _wi_id(self.sha), "kind": "file",
+            {"id": wi_id(self.sha), "kind": "file",
              "upstream_file": "file.c", "local_file": "file.c"},
         ])
         wi = ledger["commits"][self.sha]["work_items"][0]
@@ -631,7 +370,7 @@ class TestReportVisibility(TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.upstream, self.local, self.sha, self.old = _create_fixture_repos(self.tmp)
+        self.upstream, self.local, self.sha, self.old = create_fixture_repos(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -640,7 +379,7 @@ class TestReportVisibility(TestCase):
 
     def test_report_contains_validation_failed_risk(self):
         """validation_failed commits appear in the risk section."""
-        agent = MockAgent([_porting_seq(self.sha), []])
+        agent = MockAgent([porting_seq(self.sha), []])
         fail = [VerifyResult(passed=False, command="make", exit_code=1)]
         validation = MockValidation([fail, fail])
         summary, _ = run_promotion(
@@ -689,7 +428,7 @@ class TestMultiCommitOrdering(TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.upstream, self.local, self.new, self.old, self.shas = \
-            _create_multi_commit_fixture(self.tmp)
+            create_multi_commit_fixture(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -699,10 +438,10 @@ class TestMultiCommitOrdering(TestCase):
     def test_commits_processed_in_upstream_order(self):
         sha_a, sha_b = self.shas
         agent = MockAgent([
-            _port_file_seq(sha_a, "base.c",
+            port_file_seq(sha_a, "base.c",
                            "int base = 0;\n",
                            "int base = 0;\nint feat1 = 1;\n"),
-            _port_file_seq(sha_b, "base.c",
+            port_file_seq(sha_b, "base.c",
                            "int base = 0;\nint feat1 = 1;\n",
                            "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"),
         ])
@@ -756,7 +495,7 @@ class TestMultiCommitSkipBehavior(TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.upstream, self.local, self.new, self.old, self.shas = \
-            _create_multi_commit_fixture(self.tmp)
+            create_multi_commit_fixture(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -768,7 +507,7 @@ class TestMultiCommitSkipBehavior(TestCase):
 
         # Run 1: only sequence for commit A; commit B gets empty agent
         agent1 = MockAgent([
-            _port_file_seq(sha_a, "base.c",
+            port_file_seq(sha_a, "base.c",
                            "int base = 0;\n",
                            "int base = 0;\nint feat1 = 1;\n"),
         ])
@@ -793,7 +532,7 @@ class TestMultiCommitSkipBehavior(TestCase):
 
         # Run 2: skip terminal commit A, process pending commit B
         agent2 = MockAgent([
-            _port_file_seq(sha_b, "base.c",
+            port_file_seq(sha_b, "base.c",
                            "int base = 0;\nint feat1 = 1;\n",
                            "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"),
         ])
@@ -830,7 +569,7 @@ class TestMaxCommitsPerRestart(TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.upstream, self.local, self.new, self.old, self.shas = \
-            _create_multi_commit_fixture(self.tmp)
+            create_multi_commit_fixture(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -840,10 +579,10 @@ class TestMaxCommitsPerRestart(TestCase):
     def test_restart_produced_at_boundary(self):
         sha_a, sha_b = self.shas
         agent = MockAgent([
-            _port_file_seq(sha_a, "base.c",
+            port_file_seq(sha_a, "base.c",
                            "int base = 0;\n",
                            "int base = 0;\nint feat1 = 1;\n"),
-            _port_file_seq(sha_b, "base.c",
+            port_file_seq(sha_b, "base.c",
                            "int base = 0;\nint feat1 = 1;\n",
                            "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"),
         ])
@@ -886,10 +625,10 @@ class TestMaxCommitsPerRestart(TestCase):
     def test_no_restart_when_below_threshold(self):
         sha_a, sha_b = self.shas
         agent = MockAgent([
-            _port_file_seq(sha_a, "base.c",
+            port_file_seq(sha_a, "base.c",
                            "int base = 0;\n",
                            "int base = 0;\nint feat1 = 1;\n"),
-            _port_file_seq(sha_b, "base.c",
+            port_file_seq(sha_b, "base.c",
                            "int base = 0;\nint feat1 = 1;\n",
                            "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"),
         ])
@@ -952,15 +691,15 @@ class TestRestartContextContent(TestCase):
         """Through harness: restart user_message has commit ID, work items, diff."""
         tmp = Path(tempfile.mkdtemp())
         try:
-            upstream, local, new, old, shas = _create_multi_commit_fixture(tmp)
+            upstream, local, new, old, shas = create_multi_commit_fixture(tmp)
             out = tmp / "out"
             out.mkdir()
             sha_a, sha_b = shas
             agent = MockAgent([
-                _port_file_seq(sha_a, "base.c",
+                port_file_seq(sha_a, "base.c",
                                "int base = 0;\n",
                                "int base = 0;\nint feat1 = 1;\n"),
-                _port_file_seq(sha_b, "base.c",
+                port_file_seq(sha_b, "base.c",
                                "int base = 0;\nint feat1 = 1;\n",
                                "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"),
             ])
@@ -1006,15 +745,15 @@ class TestRestartContextContent(TestCase):
         """Validation results and warnings persist in ledger after restart."""
         tmp = Path(tempfile.mkdtemp())
         try:
-            upstream, local, new, old, shas = _create_multi_commit_fixture(tmp)
+            upstream, local, new, old, shas = create_multi_commit_fixture(tmp)
             out = tmp / "out"
             out.mkdir()
             sha_a, sha_b = shas
             agent = MockAgent([
-                _port_file_seq(sha_a, "base.c",
+                port_file_seq(sha_a, "base.c",
                                "int base = 0;\n",
                                "int base = 0;\nint feat1 = 1;\n"),
-                _port_file_seq(sha_b, "base.c",
+                port_file_seq(sha_b, "base.c",
                                "int base = 0;\nint feat1 = 1;\n",
                                "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"),
             ])
@@ -1117,7 +856,7 @@ class TestControlledDryRun(TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.upstream, self.local, self.sha, self.old = _create_fixture_repos(self.tmp)
+        self.upstream, self.local, self.sha, self.old = create_fixture_repos(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -1126,7 +865,7 @@ class TestControlledDryRun(TestCase):
 
     def test_dry_run_ported_output_files_and_git_diff(self):
         """Mock agent ports one commit. Verify all output files and git diff."""
-        agent = MockAgent([_porting_seq(self.sha)])
+        agent = MockAgent([porting_seq(self.sha)])
         validation = MockValidation([
             [VerifyResult(passed=True, command="make", exit_code=0)],
         ])
@@ -1188,16 +927,16 @@ class TestControlledDryRun(TestCase):
     def test_dry_run_ported_and_skipped_commit_report(self):
         """Two commits: one ported, one skipped. Report shows both correctly."""
         fixture_dir = self.tmp / "multi"
-        upstream, local, new, old, shas = _create_multi_commit_fixture(fixture_dir)
+        upstream, local, new, old, shas = create_multi_commit_fixture(fixture_dir)
         sha_a, sha_b = shas
 
         agent = MockAgent([
-            _port_file_seq(
+            port_file_seq(
                 sha_a, "base.c",
                 "int base = 0;\n",
                 "int base = 0;\nint feat1 = 1;\n",
             ),
-            _skip_seq(sha_b, "base.c"),
+            skip_seq(sha_b, "base.c"),
         ])
         val = MockValidation([
             [VerifyResult(passed=True, command="make", exit_code=0)],

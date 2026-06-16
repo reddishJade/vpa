@@ -14,217 +14,17 @@ from vpa import ledger as L
 from vpa.harness import retry_with_hint, run_promotion
 from vpa.prompt import build_restart_context, build_system_prompt
 from vpa.report import generate_summary
+from vpa.tests.fixtures import (
+    MockAgent,
+    MockValidation,
+    base_wi_id,
+    create_fixture_repos,
+    create_multi_commit_fixture,
+    port_file_seq,
+    request_human_seq,
+    wi_id,
+)
 from vpa.verify import VerifyResult
-
-# ── Mock helpers (same pattern as test_harness_int.py) ────────────────
-
-class MockAgent:
-    """Predetermined tool-call sequences. One sequence consumed per call."""
-
-    def __init__(self, sequences):
-        self.sequences = list(sequences)
-        self.call_count = 0
-        self.captured_kwargs = []
-
-    def __call__(self, **kwargs):
-        self.call_count += 1
-        self.captured_kwargs.append(kwargs)
-        if not self.sequences:
-            return ("No more sequences.", [])
-        on_tool_call = kwargs["on_tool_call"]
-        seq = self.sequences.pop(0)
-        for name, args in seq:
-            result = on_tool_call(name, args)
-            if isinstance(result, dict) and "error" in result:
-                raise RuntimeError(
-                    f"Tool '{name}' error: {result['error']}"
-                )
-        return ("Mock agent done.", [])
-
-
-class MockValidation:
-    """Predetermined verification results. One list consumed per call."""
-
-    def __init__(self, result_lists):
-        self.result_lists = list(result_lists)
-        self.call_count = 0
-
-    def __call__(self, build_cmd, test_cmds, local_repo, timeout=120):
-        self.call_count += 1
-        if self.result_lists:
-            return self.result_lists.pop(0)
-        return [VerifyResult(passed=True, command="mock", exit_code=0)]
-
-
-# ── Fixture helpers ───────────────────────────────────────────────────
-
-def _create_multi_commit_fixture(base_dir):
-    """3 commits: initial + 2 porting. Returns (upstream, local, new, old, [sha_a, sha_b])."""
-    upstream = Path(base_dir) / "upstream"
-    local = Path(base_dir) / "local"
-
-    for d in [upstream, local]:
-        d.mkdir(parents=True)
-        subprocess.run(["git", "init"], cwd=d, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=d, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=d, capture_output=True,
-        )
-
-    # Upstream initial
-    (upstream / "base.c").write_text("int base = 0;\n")
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "initial"], cwd=upstream, capture_output=True,
-    )
-    old_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    # Commit A
-    (upstream / "base.c").write_text("int base = 0;\nint feat1 = 1;\n")
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add feature 1"],
-        cwd=upstream, capture_output=True,
-    )
-    sha_a = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    # Commit B
-    (upstream / "base.c").write_text(
-        "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"
-    )
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add feature 2"],
-        cwd=upstream, capture_output=True,
-    )
-    sha_b = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    # Local matches upstream initial
-    (local / "base.c").write_text("int base = 0;\n")
-    subprocess.run(["git", "add", "."], cwd=local, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "local initial"],
-        cwd=local, capture_output=True,
-    )
-
-    return upstream, local, sha_b, old_sha, [sha_a, sha_b]
-
-
-def _create_fixture_repos(base_dir):
-    """2 upstream commits (initial + porting), local matches initial."""
-    upstream = Path(base_dir) / "upstream"
-    local = Path(base_dir) / "local"
-
-    for d in [upstream, local]:
-        d.mkdir(parents=True)
-        subprocess.run(["git", "init"], cwd=d, capture_output=True)
-        subprocess.run(
-            ["git", "config", "user.email", "test@test.com"],
-            cwd=d, capture_output=True,
-        )
-        subprocess.run(
-            ["git", "config", "user.name", "Test"],
-            cwd=d, capture_output=True,
-        )
-
-    (upstream / "file.c").write_text("int y = 2;\n")
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "initial"], cwd=upstream, capture_output=True,
-    )
-    old_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    (upstream / "file.c").write_text("int x = 1;\nint y = 2;\n")
-    subprocess.run(["git", "add", "."], cwd=upstream, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "Add x feature"],
-        cwd=upstream, capture_output=True,
-    )
-    new_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=upstream,
-        capture_output=True, text=True,
-    ).stdout.strip()
-
-    (local / "file.c").write_text("int y = 2;\n")
-    subprocess.run(["git", "add", "."], cwd=local, capture_output=True)
-    subprocess.run(
-        ["git", "commit", "-m", "local initial"],
-        cwd=local, capture_output=True,
-    )
-
-    return upstream, local, new_sha, old_sha
-
-
-def _wi_id(sha):
-    return f"{sha[:8]}:file.c:0"
-
-
-def _base_wi_id(sha):
-    return f"{sha[:8]}:base.c:0"
-
-
-def _port_file_seq(sha, filename, old_string, new_string):
-    """Porting sequence that edits a single file via edit_file."""
-    wi_id = f"{sha[:8]}:{filename}:0"
-    return [
-        ("record_intent", {"commit_sha": sha, "intent_summary": f"Port {filename}"}),
-        ("start_work_item", {"commit_sha": sha, "work_item_id": wi_id}),
-        ("append_decision", {
-            "commit_sha": sha, "work_item_id": wi_id,
-            "confidence": "high", "reason": "direct patch",
-            "evidence": [{"file": filename, "line": 1, "snippet": old_string[:20]}],
-        }),
-        ("edit_file", {
-            "path": filename, "commit_sha": sha,
-            "old_string": old_string,
-            "new_string": new_string,
-            "dry_run": True,
-        }),
-        ("edit_file", {
-            "path": filename, "commit_sha": sha,
-            "old_string": old_string,
-            "new_string": new_string,
-            "dry_run": False,
-        }),
-        ("complete_work_item", {
-            "commit_sha": sha, "work_item_id": wi_id,
-            "status": "ported", "method": "direct_patch",
-        }),
-        ("signal_done", {"commit_sha": sha}),
-    ]
-
-
-def _request_human_seq(sha):
-    """Agent requests human intervention."""
-    return [
-        ("record_intent", {"commit_sha": sha, "intent_summary": "Add x"}),
-        ("start_work_item", {"commit_sha": sha, "work_item_id": _wi_id(sha)}),
-        ("request_human", {
-            "commit_sha": sha, "work_item_id": _wi_id(sha),
-            "reason": "Complex conflict at file.c:1",
-        }),
-        ("signal_done", {"commit_sha": sha}),
-    ]
-
-
-_EVIDENCE = [{"file": "file.c", "line": 1, "snippet": "int x = 1;"}]
-
 
 # ═══════════════════════════════════════════════════════════════════════
 # Test 1 — Multi-commit skip plus validation risk
@@ -237,7 +37,7 @@ class TestMultiCommitSkipPlusValidationRisk(TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.upstream, self.local, self.new, self.old, self.shas = \
-            _create_multi_commit_fixture(self.tmp)
+            create_multi_commit_fixture(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -252,11 +52,11 @@ class TestMultiCommitSkipPlusValidationRisk(TestCase):
         passed = [VerifyResult(passed=True, command="make", exit_code=0)]
 
         agent1 = MockAgent([
-            _port_file_seq(sha_a, "base.c",
+            port_file_seq(sha_a, "base.c",
                            "int base = 0;\n",
                            "int base = 0;\nint feat1 = 1;\n"),
             [],  # repair attempt — no tools needed
-            _port_file_seq(sha_b, "base.c",
+            port_file_seq(sha_b, "base.c",
                            "int base = 0;\nint feat1 = 1;\n",
                            "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"),
         ])
@@ -322,7 +122,7 @@ class TestHITLRetryToFinalManual(TestCase):
 
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
-        self.upstream, self.local, self.sha, self.old = _create_fixture_repos(self.tmp)
+        self.upstream, self.local, self.sha, self.old = create_fixture_repos(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -331,7 +131,7 @@ class TestHITLRetryToFinalManual(TestCase):
 
     def test_hitl_retry_to_final_manual(self):
         # ── Run 1: agent requests human → needs_human ──
-        agent1 = MockAgent([_request_human_seq(self.sha)])
+        agent1 = MockAgent([request_human_seq(self.sha)])
         val1 = MockValidation([])
         run_promotion(
             upstream_path=str(self.upstream),
@@ -357,10 +157,10 @@ class TestHITLRetryToFinalManual(TestCase):
                 ("record_intent", {"commit_sha": self.sha,
                                    "intent_summary": "Still unclear"}),
                 ("start_work_item", {"commit_sha": self.sha,
-                                     "work_item_id": _wi_id(self.sha)}),
+                                     "work_item_id": wi_id(self.sha)}),
                 ("request_human", {
                     "commit_sha": self.sha,
-                    "work_item_id": _wi_id(self.sha),
+                    "work_item_id": wi_id(self.sha),
                     "reason": "Still complex after hint",
                 }),
                 ("signal_done", {"commit_sha": self.sha}),
@@ -421,7 +221,7 @@ class TestRestartContextCarriesRiskLines(TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.upstream, self.local, self.new, self.old, self.shas = \
-            _create_multi_commit_fixture(self.tmp)
+            create_multi_commit_fixture(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -436,11 +236,11 @@ class TestRestartContextCarriesRiskLines(TestCase):
         passed = [VerifyResult(passed=True, command="make", exit_code=0)]
 
         agent = MockAgent([
-            _port_file_seq(sha_a, "base.c",
+            port_file_seq(sha_a, "base.c",
                            "int base = 0;\n",
                            "int base = 0;\nint feat1 = 1;\n"),
             [],  # repair — empty sequence
-            _port_file_seq(sha_b, "base.c",
+            port_file_seq(sha_b, "base.c",
                            "int base = 0;\nint feat1 = 1;\n",
                            "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n"),
         ])
@@ -549,7 +349,7 @@ class TestBlockedCommitCountsTowardRestart(TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.upstream, self.local, self.new, self.old, self.shas = \
-            _create_multi_commit_fixture(self.tmp)
+            create_multi_commit_fixture(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -558,7 +358,7 @@ class TestBlockedCommitCountsTowardRestart(TestCase):
 
     def test_blocked_commit_triggers_restart(self):
         sha_a, sha_b = self.shas
-        wi_a = _base_wi_id(sha_a)
+        wi_a = base_wi_id(sha_a)
 
         # Sequence for commit A: start work item then raise RuntimeError
         seq_blocked = [
@@ -570,7 +370,7 @@ class TestBlockedCommitCountsTowardRestart(TestCase):
         ]
 
         # Commit B ports from initial state directly to final (A+combined)
-        seq_port_b = _port_file_seq(sha_b, "base.c",
+        seq_port_b = port_file_seq(sha_b, "base.c",
                                     "int base = 0;\n",
                                     "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n")
 
@@ -626,7 +426,7 @@ class TestGitVerifyFailureCountsTowardRestart(TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
         self.upstream, self.local, self.new, self.old, self.shas = \
-            _create_multi_commit_fixture(self.tmp)
+            create_multi_commit_fixture(self.tmp)
         self.output = self.tmp / "out"
         self.output.mkdir()
 
@@ -635,7 +435,7 @@ class TestGitVerifyFailureCountsTowardRestart(TestCase):
 
     def test_git_verify_failure_triggers_restart(self):
         sha_a, sha_b = self.shas
-        wi_a = _base_wi_id(sha_a)
+        wi_a = base_wi_id(sha_a)
         evidence = [{"file": "base.c", "line": 1, "snippet": "int base = 0;"}]
 
         # Sequence for commit A: port work item WITHOUT actually editing the file
@@ -659,7 +459,7 @@ class TestGitVerifyFailureCountsTowardRestart(TestCase):
         ]
 
         # Commit B ports from initial state directly to final (A+combined)
-        seq_port_b = _port_file_seq(sha_b, "base.c",
+        seq_port_b = port_file_seq(sha_b, "base.c",
                                     "int base = 0;\n",
                                     "int base = 0;\nint feat1 = 1;\nint feat2 = 2;\n")
 
