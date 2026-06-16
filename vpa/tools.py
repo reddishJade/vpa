@@ -399,12 +399,19 @@ TOOL_DEFINITIONS: list[ChatCompletionFunctionToolParam] = [
             "name": "signal_done",
             "description": (
                 "Signal that the current processing unit is complete. "
-                "All work items must be completed before calling this."
+                "All work items for the given commit must be completed "
+                "before calling this."
             ),
             "strict": True,
             "parameters": {
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "commit_sha": {
+                        "type": "string",
+                        "description": "Full commit SHA to validate completion for",
+                    },
+                },
+                "required": ["commit_sha"],
                 "additionalProperties": False,
             },
         },
@@ -640,5 +647,20 @@ class ToolHandler:
         L.write_ledger(self.ledger_path, self.ledger)
         return {"manual_required": True, "commit_sha": commit_sha, "work_item_id": work_item_id}
 
-    def _tool_signal_done(self):
+    def _tool_signal_done(self, commit_sha):
+        entry = self.ledger.get("commits", {}).get(commit_sha)
+        if entry:
+            terminal = {
+                "ported", "skipped", "blocked", "needs_human",
+                "validation_failed", "final_manual",
+            }
+            for wi in entry.get("work_items", []):
+                if wi["status"] not in terminal:
+                    return {
+                        "done": False,
+                        "error": (
+                            f"Work item {wi['id']} is not in terminal state "
+                            f"({wi['status']})"
+                        ),
+                    }
         return {"done": True}

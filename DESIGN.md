@@ -189,11 +189,13 @@ Harness creates structure; agent advances state; decisions are append-only.
 | API | Caller | Semantics |
 |-----|--------|-----------|
 | `init_commit_entry()` | Harness | Create commit skeleton + work items (all pending) |
+| `record_intent()` | Agent (via tool) | Record intent_summary BEFORE any edits |
+| `init_work_items()` | Harness | Populate work items for a commit |
 | `start_work_item()` | Agent (via tool) or Harness | `pending → in_progress` |
 | `append_decision()` | Agent (via tool) | Append-only decision record |
-| `complete_work_item()` | Agent (via tool) | `in_progress → ported/skipped/needs_human/blocked` |
+| `complete_work_item()` | Agent (via tool) | `in_progress → ported/skipped/needs_human/blocked/validation_failed` |
 | `record_validation()` | Harness | Record fast/slow validation results |
-| `derive_commit_status()` | Harness | Computed from work item states |
+| `derive_commit_status()` | Harness (computed) | Derived from work item states, not set directly |
 
 `mark_commit_progress(status=...)` with an unconstrained status is explicitly disallowed — it bypasses the state machine.
 
@@ -206,9 +208,13 @@ Harness creates structure; agent advances state; decisions are append-only.
 | `search_symbol(symbol, repo, kind, file_filter?)` | Cross-repo symbol search. Harness-implemented with `grep -rn`. Returns structured results with single-line context. |
 | `edit_file(path, old, new, dry_run=False)` | Exact string replacement. `dry_run=True` returns match count without writing. |
 | `write_file(path, content)` | Create new file |
-| `mark_progress(status, reason)` | Write ledger entry (executed by harness) |
-| `request_human(commit_sha, reason)` | Request human intervention |
-| `signal_done()` | Declare current slice complete |
+| `record_intent(commit_sha, intent_summary)` | Record upstream intent BEFORE any edits |
+| `start_work_item(commit_sha, work_item_id)` | `pending → in_progress` |
+| `append_decision(commit_sha, work_item_id, confidence, reason, evidence?)` | Append-only decision record |
+| `complete_work_item(commit_sha, work_item_id, status, method?)` | Transition work item to terminal status |
+| `create_work_item(commit_sha, kind, description)` | Create synthetic work item (local-only adaptation) |
+| `request_human(commit_sha, work_item_id, reason)` | Request human intervention |
+| `signal_done(commit_sha)` | Declare current slice complete (validates terminal states) |
 
 ### Constraints
 
@@ -232,7 +238,7 @@ Four modules in fixed order:
 - Prefer `read_file` over `run_bash(cat)`
 - `edit_file` must `dry_run` first, then execute; immediately verify with `run_bash(git diff {path})`
 - Forbidden: `git reset`, `git clean`, `git checkout -- <file>`, any command altering git history
-- `mark_progress` / `request_human` / `signal_done` are the only valid ledger write paths
+- `record_intent` / `start_work_item` / `append_decision` / `complete_work_item` / `create_work_item` / `request_human` / `signal_done` are the only valid ledger write paths
 
 ### Porting Judgment Framework
 (In priority order as described in Semantic Porting section above.)
@@ -241,7 +247,7 @@ Four modules in fixed order:
 - No file write without `dry_run` verification
 - No consecutive edits >5 on the same file (indicates misunderstanding; use `request_human`)
 - No inferring "these two functions are semantically equivalent" without code evidence
-- `signal_done` only after `mark_progress`
+- `signal_done(commit_sha=...)` only after all work items for that commit are in terminal state
 
 ## Hint Retry Mechanism (HITL Approval Gateway)
 

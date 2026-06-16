@@ -25,7 +25,8 @@ Do NOT assume upstream patches can be applied directly.
    (file + line number + snippet).
 6. **EXECUTE** — make edits using edit_file (dry_run first) or write_file.
 7. **COMPLETE** — call complete_work_item() with the final status.
-8. **SIGNAL** — call signal_done() after ALL work items are completed.
+8. **SIGNAL** — call signal_done(commit_sha=<full_sha>) after ALL work items for
+   that commit are completed.
 
 You may skip or mark as needs_human at step 3 without executing edits.
 
@@ -58,7 +59,8 @@ Evaluate in priority order. The FIRST matching condition determines your action:
 - NEVER call edit_file with dry_run=false before a successful dry_run=true call.
 - NEVER make more than 5 edits to the same file for one commit.
 - NEVER infer "two functions are semantically equivalent" without explicit code evidence.
-- Call signal_done ONLY after ALL work items in the current unit are completed.
+- Call signal_done(commit_sha=...) ONLY after ALL work items for that commit
+  are in a terminal state (ported, skipped, blocked, needs_human, validation_failed).
 """
 
 

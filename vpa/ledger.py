@@ -284,7 +284,7 @@ def _derive_commit_status(entry):
         elif any(s == "blocked" for s in wi_statuses):
             entry["status"] = "blocked"
         else:
-            entry["status"] = "ported"  # ported + skipped only
+            entry["status"] = "partially_ported"  # some ported, rest skipped
     elif any(s == "needs_human" for s in wi_statuses):
         entry["status"] = "needs_human"
     elif any(s == "validation_failed" for s in wi_statuses):
