@@ -1,315 +1,374 @@
-# DESIGN.md
+# VPA Design
 
-## Architecture
+VPA is an architecture-port promotion tool. Its job is not to keep a local fork
+merged with upstream. Its job is to keep an unsupported target ISA implementation
+moving by translating upstream-supported ISA work into the local target ISA.
 
-**Single agent + dual-trigger restart.** One agent instance processes commits sequentially. Restart triggers:
+The motivating path is:
 
-1. Processed N commits (configurable)
-2. Context usage exceeds 65% (char-count proxy: `sum(len(content)) / model_limit_chars`)
-
-Restart passes to the new instance:
-
-- Fixed system prompt
-- Ledger snapshot (commit-level only, hunks not expanded)
-- Current commit context (diff + local file current content)
-
-All other conversation history is discarded.
-
-## Progress Source
-
-**Ledger drives, Git verifies.** The ledger is the authoritative progress source. When agent claims a commit is "ported", harness runs `git diff HEAD` to check that local changes actually landed. Ported-in-ledger but no-change-in-git is treated as a warning signal.
-
-## Slicing Strategy
-
-**Commit as primary unit.** When a commit exceeds threshold (>300 lines or >8 files), fall back to **file granularity**. When a single file exceeds >200 lines, fall back to **hunk granularity** with full file snapshot as background.
-
-### File ordering at file-level fallback
-
-Harness performs dependency analysis on affected files (regex-based import/include parsing), limited to the commit's affected file subset. Topologically sorts files by dependency. Fallback heuristic when parsing fails:
-
-1. `.h` / `.proto` / interface definitions
-2. Utility functions / internal libs (path contains `utils/`, `lib/`, `internal/`)
-3. Core implementation files
-4. Caller / main flow files (`main.*`, `cmd/`, `cli/`)
-5. Test files (`*_test.*`, `test_*.*`)
-
-## Semantic Porting
-
-**Conservative by default.** Judgment framework in priority order:
-
-1. Upstream change exists in local at an equivalent position with matching structure → **direct patch**
-2. Intent is clear but local structure differs → **semantic port** (state intent first, then execute)
-3. Local has no corresponding module, or change targets upstream-only functionality → **skip** (reason must state "local does not have X")
-4. Independent local modifications intersect with upstream changes → **manual_required** (reason must state specific conflict location)
-
-## Verification
-
-### Fast validation (after each ported commit)
-
-- Build + directly related unit tests only
-- Failure → agent gets **one** self-repair attempt
-- Second failure → mark `needs_human`, record build/test output, continue to next commit
-
-### Slow validation (per module or every N commits)
-
-- Full test suite
-- Failure → **no self-repair**, record output directly, highlight in final summary
-
-## Ledger Schema
-
-The ledger is the agent's **external working memory**, not just a progress table. It records not only WHAT happened but WHY. This is critical for agent restart — a new instance must understand the reasoning behind previous decisions, not just their outcomes.
-
-### Three-Layer Structure
-
-**Layer 0 — Session Record** (root-level `meta`): task parameters so any agent instance can understand the job context without external input.
-
-**Layer 1 — Commit Entry**: per-upstream-commit tracking with `intent_summary` (generated BEFORE any edits, enforced by system prompt).
-
-**Layer 2 — Work Item**: the actual scheduling unit. One commit → N work items (file, hunk, or synthetic).
-
-**Layer 3 — Decision Record**: append-only. Each time agent makes a judgment about a work item, a new decision is appended with timestamp and attempt number. The latest decision is authoritative; history is preserved for review traceability.
-
-### Status Values
-
-```
-pending          — not yet attempted
-in_progress      — agent is currently working on this item
-ported           — fully ported to local
-partially_ported — some hunks done, others pending/skipped
-skipped          — intentionally not ported (no local equivalent)
-needs_human      — agent cannot proceed without human guidance
-blocked          — environment/dependency prevents progress
-validation_failed — code ported but tests fail
+```text
+box64 RISC-V/RISC-family upstream -> SW64 local port
 ```
 
-### State Machine
+If the local architecture were officially supported upstream, normal Git merge,
+rebase, or cherry-pick would be enough. The hard case exists because upstream
+continues to evolve supported architectures while the local ISA must infer and
+apply equivalent behavior elsewhere.
 
+## Core Model
+
+VPA has three sources of truth:
+
+1. **Git history**: what upstream changed and what can be applied mechanically.
+2. **Reference ISA implementation**: how a nearby supported ISA expresses the
+   intended behavior.
+3. **Build and tests**: whether the target ISA still works after promotion.
+
+The model is workflow-first. LLM calls are not the default execution unit. They
+are used when Git, structural matching, or validation expose a semantic gap.
+
+## Repository Roles
+
+```text
+upstream repo
+  Official project history. For box64, this is the source of new commits.
+
+reference ISA
+  A supported upstream architecture that is semantically close enough to guide
+  target work, for example RISC-V or another RISC-family backend.
+
+target ISA
+  The local unsupported architecture, for example SW64.
+
+local repo
+  The target fork/worktree being modified.
 ```
-pending → in_progress → ported / skipped / needs_human / blocked / validation_failed
-                ↓
-        partially_ported → ported / needs_human
 
-validation_failed → needs_human (after failed repair attempt)
-needs_human → in_progress (only via hint injection, attempt_count increments)
+The reference ISA is first-class. VPA should compare upstream changes in the
+reference backend against the current target backend before asking an LLM to
+invent a porting strategy.
+
+For `box64-2-sw64`, the default reference policy is:
+
+```text
+target ISA directory:    src/dynarec/sw64_core3
+primary reference ISA:   src/dynarec/rv64
+fallback references:     src/dynarec/la64, src/dynarec/arm64
 ```
 
-No reverse transitions. No skipping `in_progress`. `validation_failed` cannot go directly back to `in_progress` — requires hint injection.
+`rv64` is the primary reference because its file layout is closest to
+`sw64_core3` for the dynarec decoder/pass/helper structure. `la64` and `arm64`
+are useful for triangulation when `rv64` lacks coverage or when a behavior was
+implemented differently across backends, but they should not be merged into a
+single ambiguous "reference upstream" in the first implementation.
 
-### Schema
+## Execution Strategy
+
+VPA runs commits in upstream order, but each commit is routed by capability.
+
+### 1. Mechanical Git Path
+
+Use Git directly when the commit is not architecture-specific or touches files
+that are shared with the local fork:
+
+- `git cherry-pick`
+- `git merge`
+- `git rebase`
+- `git apply -3`
+- path-limited patch application
+
+This path should not call an LLM. It records the Git operation, changed files,
+and validation result.
+
+### 2. Reference-ISA Semantic Path
+
+Use this path when upstream changes a supported backend that has a target-ISA
+counterpart.
+
+Example:
+
+```text
+src/dynarec/rv64/...
+src/dynarec/sw64/...
+```
+
+Workflow:
+
+1. Detect that the commit touches reference ISA files.
+2. Map changed reference files/symbols to target ISA candidates.
+3. Extract the upstream intent from the reference diff.
+4. Locate equivalent target patterns.
+5. Apply the target-side semantic change.
+6. Build and run targeted tests.
+
+This is the main value of VPA. It is not a fallback; it is a first-class
+promotion mode for unsupported architecture work.
+
+### 3. Validation-Repair Path
+
+Use this path when Git or semantic porting produced code but build/tests fail.
+
+The repair context should include:
+
+- failing command
+- compiler/test output
+- files changed by the current commit
+- relevant reference ISA diff
+- relevant target ISA code
+
+The LLM may propose a small repair patch. VPA reruns validation after the patch.
+If the second validation fails, the commit becomes manual.
+
+### 4. Conflict Path
+
+Use this path when Git reports textual conflicts.
+
+The LLM receives only the conflict set, upstream patch, reference ISA context,
+and target-side code. It should resolve the conflict or mark it manual. The LLM
+does not advance global progress state by tool-call bookkeeping.
+
+### 5. Manual Path
+
+Use this path when the semantic mapping is unsafe.
+
+Manual items must be actionable:
+
+- upstream commit
+- reference ISA file/symbol
+- target ISA candidate file/symbol
+- why the mapping is uncertain
+- suggested next inspection or test
+
+## Routing Rules
+
+Each commit is classified before execution:
+
+```text
+shared_code          -> mechanical Git path
+target_isa_direct    -> mechanical Git path, then validation
+reference_isa_change -> reference-ISA semantic path
+cross_cutting        -> mechanical first, semantic repair if needed
+generated_or_vendor  -> skip or manual, depending on project policy
+unknown              -> inspect, then route
+```
+
+For `box64-2-sw64`, the important class is `reference_isa_change`: a commit that
+touches RISC-V/RISC-family dynarec behavior may imply equivalent SW64 work even
+when no SW64 file appears in the upstream commit.
+
+## ISA Mapping
+
+The first implementation should use path convention mapping only.
+
+For `box64-2-sw64`, the default mapping rules are:
+
+```text
+src/dynarec/rv64/                  -> src/dynarec/sw64_core3/
+dynarec_rv64_<suffix>.c            -> dynarec_sw64_<suffix>.c
+dynarec_rv64_<suffix>.h            -> dynarec_sw64_<suffix>.h
+rv64_<suffix>.c/.h/.S              -> sw64_<suffix>.c/.h/.S
+```
+
+Missing mapped files are not immediate failures. They become `manual` or
+`needs_symbol_mapping` depending on whether nearby target files exist.
+
+Symbol-name matching is intentionally deferred. It is useful, but adding it
+before the path mapper and CLI exist would make the first milestone harder to
+verify. The mapper API should leave room for a later symbol pass:
+
+```text
+path_map(reference_file) -> target candidates
+symbol_map(reference_symbol, target_candidates) -> ranked target symbols
+```
+
+## Git Is A First-Class Engine
+
+VPA should use Git primitives directly from the orchestrator, not through an LLM
+tool loop.
+
+Allowed orchestrator operations include:
+
+- create a temporary work branch
+- create checkpoints
+- cherry-pick commits
+- apply patches with three-way fallback
+- inspect conflicts
+- abort a failed operation back to the last checkpoint
+- commit successful promoted changes
+
+These operations are workflow operations, not agent actions. They should be
+guarded by explicit safe points and clear rollback behavior.
+
+## LLM Boundary
+
+The LLM should not be asked to:
+
+- call bookkeeping tools for every file
+- record intent before every edit
+- dry-run exact string replacements
+- signal completion of each work item
+- discover basic Git state that the orchestrator already knows
+
+The LLM should be asked to:
+
+- explain the intent of a reference ISA diff
+- map reference ISA behavior to target ISA code
+- resolve semantic conflicts
+- repair targeted build/test failures
+- produce an actionable manual note when mapping is unsafe
+
+The LLM output should be patch-oriented or decision-oriented, not a long sequence
+of state transition tool calls.
+
+## Ledger
+
+The ledger is a result log, not the driver of execution.
+
+It records what happened after each workflow step. It does not force the LLM to
+advance a state machine.
+
+### Commit Record
 
 ```json
 {
-  "meta": {
-    "upstream_name": "...",
-    "upstream_old": "...",
-    "upstream_new": "...",
-    "local_name": "...",
-    "local_branch": "...",
-    "arch": "...",
-    "upstream_path": "...",
-    "local_path": "...",
-    "build_cmd": "...",
-    "fast_test_cmds": ["..."],
-    "slow_test_cmds": ["..."],
-    "started_at": "...",
-    "updated_at": "..."
+  "commit": "abc123",
+  "subject": "update dynarec flag handling",
+  "classification": "reference_isa_change",
+  "status": "ported",
+  "method": "reference_isa_semantic_port",
+  "llm_used": true,
+  "reference": {
+    "isa": "rv64",
+    "files": ["src/dynarec/rv64/emit_flags.c"],
+    "symbols": ["emit_flags_update"]
   },
-  "commits": {
-    "abc123": {
-      "commit_sha": "abc123...",
-      "upstream_subject": "fix foo lifecycle",
-      "intent_summary": "Ensure foo is released when bar initialization fails.",
-      "status": "partially_ported",
-      "upstream_files": ["src/foo.c", "src/bar.c"],
-      "local_files_modified": ["src/local_foo.c"],
-      "work_items": [
-        {
-          "id": "abc123:src/foo.c:0",
-          "kind": "hunk",
-          "upstream_file": "src/foo.c",
-          "local_file": "src/local_foo.c",
-          "status": "ported",
-          "method": "semantic_port",
-          "attempt_count": 1,
-          "decisions": [
-            {
-              "timestamp": "2026-06-09T10:30:00Z",
-              "attempt": 1,
-              "confidence": "high",
-              "reason": "Local fork moved foo cleanup into local_foo_release(), but lifecycle is equivalent.",
-              "evidence": [
-                {"file": "src/local_foo.c", "line": 142, "snippet": "void local_foo_release(Foo *f) {"}
-              ]
-            }
-          ]
-        },
-        {
-          "id": "abc123:src/bar.c:1",
-          "kind": "hunk",
-          "upstream_file": "src/bar.c",
-          "local_file": null,
-          "status": "needs_human",
-          "method": null,
-          "attempt_count": 1,
-          "decisions": [
-            {
-              "timestamp": "2026-06-09T10:31:00Z",
-              "attempt": 1,
-              "confidence": "low",
-              "reason": "No local equivalent for upstream bar_retry_policy; unclear whether fork intentionally removed it."
-            }
-          ]
-        }
-      ],
-      "validation": {
-        "fast": {
-          "status": "failed",
-          "command": "make test-foo",
-          "exit_code": 2,
-          "summary": "foo_lifecycle_test fails on double release path"
-        }
-      }
-    }
+  "target": {
+    "isa": "sw64",
+    "files": ["src/dynarec/sw64/emit_flags.c"],
+    "symbols": ["sw64_emit_flags_update"]
+  },
+  "git": {
+    "operation": "semantic_patch",
+    "changed_files": ["src/dynarec/sw64/emit_flags.c"]
+  },
+  "validation": {
+    "build": "passed",
+    "targeted_tests": "passed"
+  },
+  "manual": null
+}
+```
+
+### Manual Record
+
+```json
+{
+  "commit": "def456",
+  "subject": "change vector load lowering",
+  "classification": "reference_isa_change",
+  "status": "manual",
+  "method": "manual_required",
+  "reference": {
+    "isa": "rv64",
+    "files": ["src/dynarec/rv64/vector.c"],
+    "symbols": ["lower_vector_load"]
+  },
+  "target": {
+    "isa": "sw64",
+    "files": ["src/dynarec/sw64/vector.c"],
+    "symbols": []
+  },
+  "manual": {
+    "reason": "No clear SW64 equivalent for the new RV64 vector load lowering path.",
+    "next_step": "Identify whether SW64 implements this path in scalar fallback or needs a new lowering helper."
   }
 }
 ```
 
-### Evidence Requirements
+## Validation
 
-Decision `evidence` entries must be **verifiable**: file + line number + snippet. Not free-text assertions. Reviewers or next agent instances can directly verify.
+Validation is the main correctness gate.
 
-Evidence is now **tool-enforced**: `append_decision` rejects empty or malformed
-evidence. Every decision must include at least one evidence entry with non-empty
-`file`, positive `line`, and non-empty `snippet`. The `request_human` tool is
-exempt (it represents the agent's inability to resolve).
+For `box64-2-sw64`, useful validation layers are:
 
-### Intent Summary Ordering
+- compile the SW64 target
+- run available box64 test sets
+- run focused dynarec tests when touched files are dynarec-related
+- run smoke tests for binaries that exercise translated instructions
 
-`intent_summary` must be generated after reading upstream diff and **before** any edits. System prompt enforces this ordering. No post-hoc rationalization.
+Validation failures should route to repair once. Repeated failure becomes manual.
 
-Intent ordering is now **tool-enforced**: `edit_file` and `write_file` reject
-mutations when `intent_summary` is missing for the target commit. Dry-run reads
-remain allowed (they do not change files).
+## Report
 
-### API Constraints
+The final report should answer:
 
-Harness creates structure; agent advances state; decisions are append-only.
+- which upstream commits were mechanically applied
+- which commits required reference-ISA semantic porting
+- which target files changed
+- which validations passed or failed
+- which commits need manual architecture judgment
+- what upstream range is now covered by the target ISA
 
-| API | Caller | Semantics |
-|-----|--------|-----------|
-| `init_commit_entry()` | Harness | Create commit skeleton + work items (all pending) |
-| `record_intent()` | Agent (via tool) | Record intent_summary BEFORE any edits. Tool-enforced: edit/write blocked until intent recorded. |
-| `init_work_items()` | Harness | Populate work items for a commit |
-| `start_work_item()` | Agent (via tool) or Harness | `pending → in_progress` |
-| `append_decision()` | Agent (via tool) | Append-only decision record. Tool-enforced: requires at least one evidence entry (file + line + snippet). |
-| `complete_work_item()` | Agent (via tool) | `in_progress → ported/skipped/needs_human/blocked/validation_failed`. Tool-enforced: requires prior append_decision for this attempt. |
-| `record_validation()` | Harness | Record fast/slow validation results |
-| `derive_commit_status()` | Harness (computed) | Derived from work item states, not set directly |
+The report should not expose internal agent turn bookkeeping. It should expose
+promotion facts useful to a maintainer.
 
-`mark_commit_progress(status=...)` with an unconstrained status is explicitly disallowed — it bypasses the state machine.
+## Implementation Direction
 
-## Tool Set
+The new VPA should be built around these modules:
 
-| Tool | Purpose |
-|------|---------|
-| `run_bash(cmd)` | Shell: `git log/diff/blame`, `grep`, build, test. Command whitelist enforced by harness. |
-| `read_file(path, lines?)` | Read specific file, optional line range to avoid context bloat |
-| `search_symbol(symbol, repo, kind, file_filter?)` | Cross-repo symbol search. Harness-implemented with `grep -rn`. Returns structured results with single-line context. |
-| `edit_file(path, old, new, dry_run, commit_sha)` | Exact string replacement. `dry_run=True` returns match count without writing. `commit_sha` required for intent gate. |
-| `write_file(path, content, commit_sha)` | Create new file. `commit_sha` required for intent gate. |
-| `record_intent(commit_sha, intent_summary)` | Record upstream intent BEFORE any edits |
-| `start_work_item(commit_sha, work_item_id)` | `pending → in_progress` |
-| `append_decision(commit_sha, work_item_id, confidence, reason, evidence)` | Append-only decision record. Evidence required (file + line + snippet). |
-| `complete_work_item(commit_sha, work_item_id, status, method?)` | Transition work item to terminal status. Requires prior append_decision. |
-| `create_work_item(commit_sha, kind, description)` | Create synthetic work item (local-only adaptation) |
-| `request_human(commit_sha, work_item_id, reason)` | Request human intervention |
-| `signal_done(commit_sha)` | Declare current slice complete (validates terminal states) |
-
-### Constraints
-
-- `edit_file` requires `dry_run` confirmation before actual write
-- `run_bash` uses a command-prefix whitelist; destructive operations (git reset, clean, checkout) are denied
-- No consecutive edits >5 on the same file
-
-## System Prompt Structure
-
-Four modules in fixed order:
-
-### Role
-"You are a code version promotion agent. Your task is to port changes from upstream {old_rev} to {new_rev} into the local repository. The local repository has independent modifications for the {arch} architecture; do not assume upstream patches apply directly."
-
-### Task Contract
-- Current unit: {slice_description} (commit {sha} / file {path})
-- Ledger state: {ledger_summary}
-- Goal: port the above unit to local, or provide a clear skip/manual judgment
-
-### Tool Rules
-- Prefer `read_file` over `run_bash(cat)`
-- `edit_file` must `dry_run` first, then execute; immediately verify with `run_bash(git diff {path})`
-- Forbidden: `git reset`, `git clean`, `git checkout -- <file>`, any command altering git history
-- `record_intent` / `start_work_item` / `append_decision` / `complete_work_item` / `create_work_item` / `request_human` / `signal_done` are the only valid ledger write paths
-
-### Porting Judgment Framework
-(In priority order as described in Semantic Porting section above.)
-
-### Hard Constraints
-- No file write without `dry_run` verification
-- No consecutive edits >5 on the same file (indicates misunderstanding; use `request_human`)
-- No inferring "these two functions are semantically equivalent" without code evidence
-- `signal_done(commit_sha=...)` only after all work items for that commit are in terminal state
-
-## Hint Retry Mechanism (HITL Approval Gateway)
-
-When agent calls `request_human`:
-
-1. Harness pauses the commit, marks `status=manual_required` in ledger
-2. After promotion run (or in real-time), operator sees the `manual_required` list
-3. Per entry, operator can: provide hint, skip, or inspect current state
-4. Entries with hints get reconstructed context: system prompt + ledger snapshot + commit diff + local file content + hint injection block
-5. New agent instance re-evaluates; result goes through fast validation
-6. If re-attempt also calls `request_human`, mark `final_manual` (terminal state, no further retry)
-
-Hint injection block format:
-
-```
-Human review note for this commit:
-{hint}
-Re-evaluate porting strategy based on the above guidance.
+```text
+vpa/
+  git_engine.py        Git operations, checkpoints, conflict inspection
+  classifier.py        Commit and file classification
+  isa_mapper.py        Reference ISA -> target ISA file/symbol mapping
+  semantic_porter.py   LLM-backed reference-to-target patch generation
+  validator.py         Build/test execution and result parsing
+  ledger.py            Append result records
+  report.py            Human and machine-readable summaries
+  main.py              Orchestrator CLI
 ```
 
-Placed at the end of system prompt, not in user message.
+The old agent-loop design should not be optimized further. The replacement
+should start from the architecture-port workflow above.
 
-## Output
+## Milestones
 
-Two layers: machine-readable JSON ledger + human-readable Markdown summary.
+### Milestone 1: New VPA Skeleton And CLI
 
-### Markdown Summary Structure
+Goal: create the new workflow shape without depending on the old per-file agent
+loop.
 
-```markdown
-# Promotion Report: {upstream_old}..{upstream_new} → {local_branch}
+Acceptance criteria:
 
-## Overview
-- Total upstream commits: N
-- Ported: X  |  Skipped: Y  |  Manual Required: Z  |  Needs Human: W
-- Fast validation: PASS / FAIL (N failures)
-- Slow validation: PASS / FAIL / NOT RUN
+- CLI accepts upstream repo, local repo, revision range, target ISA, primary
+  reference ISA, fallback references, build command, and test commands.
+- The orchestrator can enumerate upstream commits in order.
+- The classifier can label commits as `shared_code`, `reference_isa_change`,
+  `target_isa_direct`, `cross_cutting`, `generated_or_vendor`, or `unknown`.
+- The ISA mapper can map `rv64` paths to `sw64_core3` candidate paths using path
+  convention only.
+- The ledger writes result-log records, not agent state-machine records.
+- No LLM call is required for this milestone.
 
-## Ported Commits
-| SHA (short) | Method | Files Modified |
-|-------------|--------|---------------|
+### Milestone 2: Mechanical Git Path
 
-## Manual Required
-(Each entry: sha, file:line, conflict description, suggested next step)
+Goal: run the Git-first path end to end.
 
-## Skipped
-| SHA | Reason |
-|-----|--------|
+Acceptance criteria:
 
-## Risk Points
-(Real risks only, not vague concerns)
+- Create checkpoint.
+- Try cherry-pick or three-way patch application.
+- Run build and configured fast tests.
+- Record success, conflict, validation failure, or rollback result.
 
-## Modified Files
-(Deduplicated list)
-```
+### Milestone 3: Reference ISA To Target ISA Semantic Mapping
 
-Key rule: **Manual Required entries must be actionable** — file + line number, specific conflict description, preliminary handling suggestion.
+Goal: handle `rv64` changes that imply `sw64_core3` work.
+
+Acceptance criteria:
+
+- Detect reference-ISA-only commits.
+- Map touched `rv64` files to `sw64_core3` candidates.
+- Build a compact semantic-port context from reference diff and target file.
+- Produce a patch or manual item.
+- Validate the result.
