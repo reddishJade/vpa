@@ -19,6 +19,7 @@ dev = ["ruff>=0.15", "pyright>=1.1", "pytest>=8.0"]
 [tool.ruff]
 line-length = 100
 target-version = "py313"
+extend-exclude = ["box64-2-sw64", "box64_2_sw64.tar.gz"]
 
 [tool.ruff.lint]
 select = [
@@ -39,3 +40,8 @@ typeCheckingMode = "basic"
 pythonVersion = "3.13"
 reportMissingTypeStubs = false
 reportUnknownMemberType = false
+exclude = ["box64-2-sw64", ".venv"]
+
+[tool.pytest.ini_options]
+testpaths = ["vpa/tests"]
+norecursedirs = ["box64-2-sw64", ".venv"]

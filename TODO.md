@@ -21,12 +21,12 @@ not mean VPA is finished.
 
 ## Open Design Cleanup
 
-- [ ] Standardize gate decision naming across docs and code before Phase 1
+- [x] Standardize gate decision naming across docs and code before Phase 1
       implementation. Preferred enum: `needs_validation_only`.
-- [ ] Decide how to handle the existing top-level legacy modules that conflict
+- [x] Decide how to handle the existing top-level legacy modules that conflict
       with the target package layout, especially `vpa/ledger.py` vs
       `vpa/ledger/`.
-- [ ] Decide whether legacy modules should move under a `legacy/` namespace or
+- [x] Decide whether legacy modules should move under a `legacy/` namespace or
       remain untouched until replaced.
 
 ## Phase 1: Skeleton And CLI
@@ -35,148 +35,148 @@ Goal: establish the new workflow shape without LLM dependency.
 
 ### Package Layout
 
-- [ ] Create `vpa/orchestrator/`.
-- [ ] Create `vpa/orchestrator/models.py`.
-- [ ] Create `vpa/orchestrator/promotion.py`.
-- [ ] Create `vpa/orchestrator/llm_gate.py`.
-- [ ] Create `vpa/engines/`.
-- [ ] Create `vpa/engines/git.py`.
-- [ ] Create `vpa/engines/validation.py`.
-- [ ] Create `vpa/engines/repair.py`.
-- [ ] Create `vpa/analysis/`.
-- [ ] Create `vpa/analysis/classifier.py`.
-- [ ] Create `vpa/analysis/change_analyzer.py`.
-- [ ] Create `vpa/analysis/isa_mapper.py`.
-- [ ] Create the new ledger/report package after resolving the legacy
+- [x] Create `vpa/orchestrator/`.
+- [x] Create `vpa/orchestrator/models.py`.
+- [x] Create `vpa/orchestrator/promotion.py`.
+- [x] Create `vpa/orchestrator/llm_gate.py`.
+- [x] Create `vpa/engines/`.
+- [x] Create `vpa/engines/git.py`.
+- [x] Create `vpa/engines/validation.py`.
+- [x] Create `vpa/engines/repair.py`.
+- [x] Create `vpa/analysis/`.
+- [x] Create `vpa/analysis/classifier.py`.
+- [x] Create `vpa/analysis/change_analyzer.py`.
+- [x] Create `vpa/analysis/isa_mapper.py`.
+- [x] Create the new ledger/report package after resolving the legacy
       `vpa/ledger.py` naming conflict.
 
 ### Core Models
 
-- [ ] Define `CommitInfo`.
-- [ ] Define `DiffContext`.
-- [ ] Define `FileDiff`.
-- [ ] Define `DiffHunk`.
-- [ ] Define `DiffLine`.
-- [ ] Define `BaseCommitContext` for `CommitInfo + DiffContext`.
-- [ ] Define full `CommitContext` for commit, diff, classification, and
+- [x] Define `CommitInfo`.
+- [x] Define `DiffContext`.
+- [x] Define `FileDiff`.
+- [x] Define `DiffHunk`.
+- [x] Define `DiffLine`.
+- [x] Define `BaseCommitContext` for `CommitInfo + DiffContext`.
+- [x] Define full `CommitContext` for commit, diff, classification, and
       mapping.
-- [ ] Define `ClassifiedCommit`.
-- [ ] Define commit/file classification enums.
-- [ ] Define `MappingResult` and per-file `FileMapping`.
-- [ ] Define `ChangeSignal`.
-- [ ] Define `ChangeAnalysis`.
-- [ ] Define `GatePolicy`.
-- [ ] Define `GatePolicy` fields: confidence thresholds, risk preference,
+- [x] Define `ClassifiedCommit`.
+- [x] Define commit/file classification enums.
+- [x] Define `MappingResult` and per-file `FileMapping`.
+- [x] Define `ChangeSignal`.
+- [x] Define `ChangeAnalysis`.
+- [x] Define `GatePolicy`.
+- [x] Define `GatePolicy` fields: confidence thresholds, risk preference,
       dry-run flag, and per-project overrides.
-- [ ] Define `GateDecision`.
-- [ ] Define validation and ledger result records.
+- [x] Define `GateDecision`.
+- [x] Define validation and ledger result records.
 
 ### CLI
 
-- [ ] Add CLI options for upstream repo.
-- [ ] Add CLI options for local repo.
-- [ ] Add CLI options for revision range.
-- [ ] Add CLI options for target ISA path.
-- [ ] Add CLI options for primary reference ISA path.
-- [ ] Add CLI options for fallback reference ISA paths.
-- [ ] Add CLI options for build command.
-- [ ] Add CLI options for smoke/test commands.
-- [ ] Add dry-run mode.
-- [ ] Add output paths for ledger/report artifacts.
+- [x] Add CLI options for upstream repo.
+- [x] Add CLI options for local repo.
+- [x] Add CLI options for revision range.
+- [x] Add CLI options for target ISA path.
+- [x] Add CLI options for primary reference ISA path.
+- [x] Add CLI options for fallback reference ISA paths.
+- [x] Add CLI options for build command.
+- [x] Add CLI options for smoke/test commands.
+- [x] Add dry-run mode.
+- [x] Add output paths for ledger/report artifacts.
 
 ### Git Read Path
 
-- [ ] Enumerate upstream commits in revision order.
-- [ ] Read commit metadata into `CommitInfo`.
-- [ ] Read raw patch text.
-- [ ] Parse raw patch into `DiffContext`, `FileDiff`, `DiffHunk`, and
+- [x] Enumerate upstream commits in revision order.
+- [x] Read commit metadata into `CommitInfo`.
+- [x] Read raw patch text.
+- [x] Parse raw patch into `DiffContext`, `FileDiff`, `DiffHunk`, and
       `DiffLine`.
-- [ ] Keep raw patch text available for provenance, ledger records, debugging,
+- [x] Keep raw patch text available for provenance, ledger records, debugging,
       and future LLM context.
 
 ### Classifier
 
-- [ ] Classify `shared_code`.
-- [ ] Classify `reference_isa_change`.
-- [ ] Classify `target_isa_direct`.
-- [ ] Classify `cross_cutting`.
-- [ ] Classify `generated_or_vendor`.
-- [ ] Classify `unknown`.
-- [ ] Keep classification separate from LLM gate decisions.
+- [x] Classify `shared_code`.
+- [x] Classify `reference_isa_change`.
+- [x] Classify `target_isa_direct`.
+- [x] Classify `cross_cutting`.
+- [x] Classify `generated_or_vendor`.
+- [x] Classify `unknown`.
+- [x] Keep classification separate from LLM gate decisions.
 
 ### ISA Mapper
 
-- [ ] Implement path-only mapping from `src/dynarec/rv64/` to
+- [x] Implement path-only mapping from `src/dynarec/rv64/` to
       `src/dynarec/sw64_core3/`.
-- [ ] Implement filename transforms:
+- [x] Implement filename transforms:
       `dynarec_rv64_* -> dynarec_sw64_*`.
-- [ ] Implement filename transforms:
+- [x] Implement filename transforms:
       `rv64_* -> sw64_*`.
-- [ ] Return per-file mapping status: `mapped`, `missing_target`, `ambiguous`,
+- [x] Return per-file mapping status: `mapped`, `missing_target`, `ambiguous`,
       or `not_reference_file`.
-- [ ] Preserve API room for later symbol mapping without implementing it now.
+- [x] Preserve API room for later symbol mapping without implementing it now.
 
 ### Change Analyzer
 
-- [ ] Implement explicit analyzer chain registration.
-- [ ] Implement sub-analyzer interface that only emits `ChangeSignal`.
-- [ ] Implement aggregator that owns `kind`, `confidence`, and
+- [x] Implement explicit analyzer chain registration.
+- [x] Implement sub-analyzer interface that only emits `ChangeSignal`.
+- [x] Implement aggregator that owns `kind`, `confidence`, and
       `suggested_gate`.
-- [ ] Implement aggregator rules: highest-risk kind wins; multiple meaningful
+- [x] Implement aggregator rules: highest-risk kind wins; multiple meaningful
       kinds collapse to `mixed`; signals retain full detail regardless of final
       kind.
-- [ ] Implement diff-text analyzer.
-- [ ] Implement normalization analyzer for blank lines, comments, and practical
+- [x] Implement diff-text analyzer.
+- [x] Implement normalization analyzer for blank lines, comments, and practical
       formatting noise.
-- [ ] Implement conservative symbol/signature text analyzer.
-- [ ] Detect comment-only changes.
-- [ ] Detect whitespace/format-only changes.
-- [ ] Detect metadata/include-only changes.
-- [ ] Detect likely runtime semantic patterns: branches, returns, assignments,
+- [x] Implement conservative symbol/signature text analyzer.
+- [x] Detect comment-only changes.
+- [x] Detect whitespace/format-only changes.
+- [x] Detect metadata/include-only changes.
+- [x] Detect likely runtime semantic patterns: branches, returns, assignments,
       macro definitions, helper calls, opcode tables, constants, flag updates,
       and data-structure changes.
-- [ ] Define the initial risk order used by the aggregator.
-- [ ] Ensure Phase 1 works without libclang, tree-sitter, compiler
+- [x] Define the initial risk order used by the aggregator.
+- [x] Ensure Phase 1 works without libclang, tree-sitter, compiler
       databases, or macro expansion.
 
 ### LLM Gate
 
-- [ ] Implement pure `llm_gate.decide(change_analysis, policy, context)`.
-- [ ] Ensure gate does not mutate worktree, read config, call Git, or call an
+- [x] Implement pure `llm_gate.decide(change_analysis, policy, context)`.
+- [x] Ensure gate does not mutate worktree, read config, call Git, or call an
       LLM.
-- [ ] Route non-semantic reference changes to `no_target_change`.
-- [ ] Route obvious semantic reference changes with mapped targets to
+- [x] Route non-semantic reference changes to `no_target_change`.
+- [x] Route obvious semantic reference changes with mapped targets to
       `needs_semantic_port`.
-- [ ] Route semantic reference changes with missing/ambiguous target mapping to
+- [x] Route semantic reference changes with missing/ambiguous target mapping to
       `needs_manual_review`.
-- [ ] Route shared or target-direct changes to `needs_validation_only` without
+- [x] Route shared or target-direct changes to `needs_validation_only` without
       LLM semantic porting.
-- [ ] Preserve gate reasons for ledger/report output.
+- [x] Preserve gate reasons for ledger/report output.
 
 ### Ledger And Report
 
-- [ ] Implement append-only result records.
+- [x] Implement append-only result records.
 - [ ] Record commit, subject, classification, method, changed files, reference
       context, target context, validation result, LLM use, and manual item.
-- [ ] Keep ledger independent from execution control.
-- [ ] Generate a human-readable summary report.
-- [ ] Generate a machine-readable report artifact.
+- [x] Keep ledger independent from execution control.
+- [x] Generate a human-readable summary report.
+- [x] Generate a machine-readable report artifact.
 
 ### Phase 1 Tests
 
-- [ ] Test CLI argument parsing.
-- [ ] Test commit/file classification.
-- [ ] Test raw patch plus parsed hunk `DiffContext`.
-- [ ] Test staged context construction without optional half-filled fields.
-- [ ] Test `rv64` to `sw64_core3` path mapping.
-- [ ] Test per-file `MappingResult`.
-- [ ] Test missing mapped target files.
-- [ ] Test comment-only and format-only change analysis.
-- [ ] Test obvious semantic diff analysis.
-- [ ] Test signal source recording.
-- [ ] Test gate decisions.
-- [ ] Test operation without AST dependencies.
-- [ ] Test ledger record serialization.
+- [x] Test CLI argument parsing.
+- [x] Test commit/file classification.
+- [x] Test raw patch plus parsed hunk `DiffContext`.
+- [x] Test staged context construction without optional half-filled fields.
+- [x] Test `rv64` to `sw64_core3` path mapping.
+- [x] Test per-file `MappingResult`.
+- [x] Test missing mapped target files.
+- [x] Test comment-only and format-only change analysis.
+- [x] Test obvious semantic diff analysis.
+- [x] Test signal source recording.
+- [x] Test gate decisions.
+- [x] Test operation without AST dependencies.
+- [x] Test ledger record serialization.
 
 ## Phase 2: Mechanical Git Path
 
