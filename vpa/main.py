@@ -3,7 +3,12 @@ import sys
 from pathlib import Path
 
 from .orchestrator.models import GatePolicy, RiskPreference
-from .orchestrator.promotion import PromotionConfig, PromotionOrchestrator, render_plan
+from .orchestrator.promotion import (
+    PromotionConfig,
+    PromotionOrchestrator,
+    render_plan,
+    render_run,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -40,6 +45,11 @@ def build_parser() -> argparse.ArgumentParser:
     promote_p.add_argument("--ledger-path", default=None, help="Ledger artifact path")
     promote_p.add_argument("--report-path", default=None, help="Report artifact path")
     promote_p.add_argument("--dry-run", action="store_true", help="Plan without mutating repos")
+    promote_p.add_argument(
+        "--execute",
+        action="store_true",
+        help="Run the mechanical Git path for eligible commits",
+    )
     promote_p.add_argument(
         "--semantic-confidence-threshold",
         type=float,
@@ -88,8 +98,13 @@ def main(argv=None):
             report_path=Path(args.report_path) if args.report_path else None,
             gate_policy=policy,
         )
-        plan = PromotionOrchestrator(config).plan()
-        print(render_plan(plan))
+        orchestrator = PromotionOrchestrator(config)
+        if args.execute and not args.dry_run:
+            run = orchestrator.execute()
+            print(render_run(run))
+        else:
+            plan = orchestrator.plan()
+            print(render_plan(plan))
         return
 
     parser.print_help()

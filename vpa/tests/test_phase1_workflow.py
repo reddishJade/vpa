@@ -172,3 +172,26 @@ def test_promote_cli_builds_config_and_renders_plan(capsys):
     assert config.dry_run is True
     assert config.smoke_commands == ["make test"]
     assert "VPA promotion plan" in capsys.readouterr().out
+
+
+def test_promote_cli_execute_runs_mechanical_workflow(capsys):
+    with patch("vpa.main.PromotionOrchestrator") as orchestrator_cls:
+        orchestrator = orchestrator_cls.return_value
+        orchestrator.execute.return_value.plan.commits = []
+        orchestrator.execute.return_value.executed = []
+        main(
+            [
+                "promote",
+                "--upstream-repo",
+                "upstream",
+                "--local-repo",
+                "local",
+                "--rev-range",
+                "old..new",
+                "--execute",
+            ]
+        )
+
+    orchestrator.execute.assert_called_once_with()
+    orchestrator.plan.assert_not_called()
+    assert "VPA promotion execution" in capsys.readouterr().out

@@ -1,7 +1,8 @@
-"""Git read helpers for the workflow.
+"""Git helpers for the workflow.
 
 This module intentionally wraps Git as a first-class engine. Phase 1 only reads
-commit metadata and patch text; mutation commands belong to later phases.
+commit metadata and patch text. Phase 2 adds controlled mutation commands that
+return structured results for the orchestrator and ledger.
 """
 
 from __future__ import annotations
@@ -19,6 +20,10 @@ from vpa.orchestrator.models import (
     FileDiff,
     FileLanguage,
     FileStatus,
+    GitApplyResult,
+    GitCommandResult,
+    GitOperationStatus,
+    PromotionMethod,
 )
 
 _HUNK_RE = re.compile(
@@ -54,6 +59,98 @@ class GitEngine:
         raw_patch = self.read_raw_patch(sha)
         return parse_diff_context(commit, raw_patch)
 
+    def checkpoint(self) -> str:
+        return self._run(["rev-parse", "HEAD"]).stdout.strip()
+
+    def current_head(self) -> str:
+        return self.checkpoint()
+
+    def create_work_branch(self, branch_name: str) -> GitCommandResult:
+        return self._run_result(["checkout", "-B", branch_name])
+
+    def cherry_pick_from(self, upstream_repo: str | Path, sha: str) -> GitApplyResult:
+        fetch = self._run_result(["fetch", "--no-tags", str(upstream_repo), sha])
+        if fetch.returncode != 0:
+            return GitApplyResult(
+                status=GitOperationStatus.FAILED,
+                method=PromotionMethod.CHERRY_PICK,
+                command=fetch,
+                conflicts=self.conflicted_files(),
+            )
+
+        result = self._run_result(["cherry-pick", "--no-edit", "FETCH_HEAD"])
+        if result.returncode == 0:
+            return GitApplyResult(
+                status=GitOperationStatus.APPLIED,
+                method=PromotionMethod.CHERRY_PICK,
+                command=result,
+                commit_sha=self.current_head(),
+            )
+
+        conflicts = self.conflicted_files()
+        return GitApplyResult(
+            status=GitOperationStatus.CONFLICT if conflicts else GitOperationStatus.FAILED,
+            method=PromotionMethod.CHERRY_PICK,
+            command=result,
+            conflicts=conflicts,
+        )
+
+    def apply_patch_3way(self, patch_text: str) -> GitApplyResult:
+        result = self._run_result(["apply", "--3way", "--index", "-"], input_text=patch_text)
+        if result.returncode != 0:
+            conflicts = self.conflicted_files()
+            if not conflicts:
+                direct = self._run_result(["apply", "--index", "-"], input_text=patch_text)
+                if direct.returncode == 0:
+                    return self._commit_applied_patch(direct)
+                result = direct
+            return GitApplyResult(
+                status=GitOperationStatus.CONFLICT if conflicts else GitOperationStatus.FAILED,
+                method=PromotionMethod.PATH_LIMITED_APPLY_3WAY,
+                command=result,
+                conflicts=conflicts,
+            )
+
+        return self._commit_applied_patch(result)
+
+    def _commit_applied_patch(self, apply_result: GitCommandResult) -> GitApplyResult:
+        commit = self._run_result(
+            [
+                "-c",
+                "user.name=VPA",
+                "-c",
+                "user.email=vpa@example.invalid",
+                "commit",
+                "-m",
+                "VPA path-limited apply",
+            ]
+        )
+        if commit.returncode == 0:
+            return GitApplyResult(
+                status=GitOperationStatus.APPLIED,
+                method=PromotionMethod.PATH_LIMITED_APPLY_3WAY,
+                command=commit,
+                commit_sha=self.current_head(),
+            )
+        return GitApplyResult(
+            status=GitOperationStatus.FAILED,
+            method=PromotionMethod.PATH_LIMITED_APPLY_3WAY,
+            command=commit if commit.returncode != 0 else apply_result,
+            conflicts=self.conflicted_files(),
+        )
+
+    def abort_cherry_pick(self) -> GitCommandResult:
+        return self._run_result(["cherry-pick", "--abort"])
+
+    def reset_to_checkpoint(self, checkpoint: str) -> GitCommandResult:
+        return self._run_result(["reset", "--hard", checkpoint])
+
+    def conflicted_files(self) -> list[Path]:
+        result = self._run_result(["diff", "--name-only", "--diff-filter=U"])
+        if result.returncode != 0:
+            return []
+        return [Path(line) for line in result.stdout.splitlines() if line]
+
     def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             ["git", *args],
@@ -63,11 +160,42 @@ class GitEngine:
             text=True,
         )
 
+    def _run_result(
+        self,
+        args: list[str],
+        *,
+        input_text: str | None = None,
+    ) -> GitCommandResult:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=self.repo,
+            input=input_text,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return GitCommandResult(
+            args=["git", *args],
+            cwd=self.repo,
+            status=(
+                GitOperationStatus.APPLIED
+                if completed.returncode == 0
+                else GitOperationStatus.FAILED
+            ),
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+
 
 def parse_diff_context(commit: CommitInfo, raw_patch: str) -> DiffContext:
     file_patches = _split_file_patches(raw_patch)
     files = [_parse_file_patch(file_patch) for file_patch in file_patches]
     return DiffContext(commit=commit, raw_patch=raw_patch, files=files)
+
+
+def render_patch(files: list[FileDiff]) -> str:
+    return "".join(file.raw_patch for file in files)
 
 
 def _split_file_patches(raw_patch: str) -> list[str]:
@@ -193,4 +321,3 @@ def detect_language(path: Path | None) -> FileLanguage:
     if suffix in {".md", ".txt", ".rst"}:
         return FileLanguage.TEXT
     return FileLanguage.UNKNOWN
-

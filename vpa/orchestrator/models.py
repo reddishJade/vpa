@@ -84,6 +84,23 @@ class ValidationStatus(StrEnum):
     ERROR = "error"
 
 
+class GitOperationStatus(StrEnum):
+    NOT_RUN = "not_run"
+    APPLIED = "applied"
+    SKIPPED = "skipped"
+    CONFLICT = "conflict"
+    FAILED = "failed"
+    ROLLED_BACK = "rolled_back"
+
+
+class PromotionMethod(StrEnum):
+    SKIP = "skip"
+    CHERRY_PICK = "cherry_pick"
+    PATH_LIMITED_APPLY_3WAY = "path_limited_apply_3way"
+    MANUAL = "manual"
+    SEMANTIC_PORT_PENDING = "semantic_port_pending"
+
+
 @dataclass(frozen=True)
 class CommitInfo:
     sha: str
@@ -221,12 +238,33 @@ class ValidationResult:
 
 
 @dataclass(frozen=True)
+class GitCommandResult:
+    args: list[str]
+    cwd: Path
+    status: GitOperationStatus
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+
+
+@dataclass(frozen=True)
+class GitApplyResult:
+    status: GitOperationStatus
+    method: PromotionMethod
+    checkpoint: str | None = None
+    command: GitCommandResult | None = None
+    conflicts: list[Path] = field(default_factory=list)
+    commit_sha: str | None = None
+
+
+@dataclass(frozen=True)
 class LedgerRecord:
     commit: CommitInfo
     classification: CommitClass
     gate: GateDecisionKind
     changed_files: list[Path]
+    method: PromotionMethod = PromotionMethod.SKIP
+    git: GitApplyResult | None = None
     validation: ValidationResult | None = None
     llm_used: bool = False
     manual_item: str | None = None
-

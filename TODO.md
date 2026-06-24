@@ -183,20 +183,20 @@ Goal: establish the new workflow shape without LLM dependency.
 Goal: run Git-first promotion end to end for commits that do not require
 semantic porting.
 
-- [ ] Create one orchestrator checkpoint per upstream commit.
+- [x] Create one orchestrator checkpoint per upstream commit.
 - [ ] Implement temporary work branch support.
-- [ ] Implement cherry-pick path.
-- [ ] Implement path-limited patch application where useful.
-- [ ] Define path-limited patch policy in the orchestrator: use classifier
+- [x] Implement cherry-pick path.
+- [x] Implement path-limited patch application where useful.
+- [x] Define path-limited patch policy in the orchestrator: use classifier
       results and gate decisions to choose path-limited application; keep the
       Git engine as the executor, not the policy owner.
-- [ ] Implement `git apply -3` fallback.
-- [ ] Detect textual conflicts.
-- [ ] Abort back to the current commit checkpoint.
-- [ ] Run configured build command.
-- [ ] Run configured smoke/test commands.
-- [ ] Record success, conflict, validation failure, rollback, or manual result.
-- [ ] Add tests with small temporary Git repositories.
+- [x] Implement `git apply -3` fallback.
+- [x] Detect textual conflicts.
+- [x] Abort back to the current commit checkpoint.
+- [x] Run configured build command.
+- [x] Run configured smoke/test commands.
+- [x] Record success, conflict, validation failure, rollback, or manual result.
+- [x] Add tests with small temporary Git repositories.
 
 ## Phase 3: Reference ISA To Target ISA Semantic Mapping
 
