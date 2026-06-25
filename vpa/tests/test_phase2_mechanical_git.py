@@ -179,4 +179,4 @@ def test_render_run_shows_merge_and_semantic_port(tmp_path):
 
     rendered = render_run(run)
     assert "--- merge upstream ---" in rendered
-    assert "applied" in rendered
+    assert "committed" in rendered

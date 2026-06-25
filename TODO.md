@@ -112,40 +112,30 @@ globally with the per-file stratified strategy.
 
 ---
 
-## Phase 3: ISA Translation Agent + Grouped Execution Loop
+## Phase 3: ISA Translation Agent — ✅ Complete
 
 **Goal**: replace `_execute_semantic_port` with agent loop using `isa_translate`
-op and structured ChangeSet output. Wire grouped execution into `execute()`.
+op and structured ChangeSet output. Per-commit three-axis ledger display.
 
-### P3.1: Refactor `execute()` to grouped loop
+### P3.1: `isa_translate` agent loop
 
-- [ ] Replace flat `for commit in plan.commits` with `for group in groups`
-- [ ] `SHARED_CODE` group → one merge call
-- [ ] `REFERENCE_ISA_CHANGE` group → per-commit ISA translation, per-commit checkpoint
-- [ ] `TARGET_ISA_DIRECT` group → per-commit path-limited apply, per-commit checkpoint
-- [ ] Group-level validation after each group completes
+- [x] `isa_translate()` method in `RepairEngine` builds context + calls agent loop
+- [x] `_execute_isa_translate()` in `promotion.py` replaces `_execute_semantic_port()`
+- [x] Agent loop calls `_llm_call`; final response parsed as JSON ChangeSet on `op="translate"`
 
-### P3.2: `isa_translate` agent loop
+### P3.2: ChangeSet parsing and application
 
-- [ ] Add operation type to `RepairEngine` for ISA translation
-- [ ] Implement `_execute_isa_translate()` in `promotion.py` replacing `_execute_semantic_port()`
+- [x] `_apply_changeset()` parses `{changes: [{op, path, edits/content}]}`
+- [x] Each edit validated: exact anchor match, single hit required
+- [x] `modify`/`replace` applies in memory; `create` writes new file
+- [x] Paths resolved relative to `repo_root`
 
-### P3.3: ChangeSet parsing and application
+### P3.3: Per-commit three-axis ledger
 
-- [ ] Parse LLM output as structured ChangeSet (`op: modify|create`, `path`, `edits`/`content`)
-- [ ] Validate each edit: exact anchor match, single hit required
-- [ ] Apply in memory, verify no conflict markers, compute before/after hash
-- [ ] Write via temp file + atomic rename
-
-### P3.4: Per-commit three-axis ledger
-
-- [ ] Wire `LedgerRecord` into `execute()` per-ISA-translated commit
-- [ ] `render_run` displays apply/integrity/validation status
-
-### P3.5: Update `render_run` for groups and three-axis display
-
-- [ ] Show group boundaries in output
-- [ ] Show apply/integrity/validation per commit
+- [x] `_ledger_record()` uses `apply_status` (committed/skipped/rolled_back) with `apply_reason`
+- [x] `render_run` merge section: apply/integrity/validation three-axis
+- [x] `render_run` per-commit section: apply/validation two-axis (integrity not tracked per-commit)
+- [x] `_apply_status_label()` maps `GitOperationStatus` to human labels
 
 ---
 

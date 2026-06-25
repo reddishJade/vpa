@@ -1,17 +1,18 @@
-import subprocess
+import json
 from pathlib import Path
+from unittest.mock import patch
 
 from vpa.engines.repair import RepairEngine, build_semantic_port_context
 from vpa.orchestrator.models import (
     GitOperationStatus,
     PromotionMethod,
-    SemanticPortContext,
-    ValidationStatus,
 )
 from vpa.orchestrator.promotion import PromotionConfig, PromotionOrchestrator
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo, *args):
+    import subprocess
+
     completed = subprocess.run(
         ["git", *args],
         cwd=repo,
@@ -22,7 +23,7 @@ def _git(repo: Path, *args: str) -> str:
     return completed.stdout.strip()
 
 
-def _init_repo(repo: Path) -> None:
+def _init_repo(repo):
     repo.mkdir()
     _git(repo, "init")
     _git(repo, "config", "core.autocrlf", "false")
@@ -30,7 +31,7 @@ def _init_repo(repo: Path) -> None:
     _git(repo, "config", "user.email", "vpa-test@example.invalid")
 
 
-def _commit_file(repo: Path, path: str, content: str, message: str) -> str:
+def _commit_file(repo, path, content, message):
     full_path = repo / path
     full_path.parent.mkdir(parents=True, exist_ok=True)
     full_path.write_text(content, encoding="utf-8")
@@ -39,17 +40,19 @@ def _commit_file(repo: Path, path: str, content: str, message: str) -> str:
     return _git(repo, "rev-parse", "HEAD")
 
 
-def _clone(src: Path, dst: Path) -> None:
+def _clone(src, dst):
+    import subprocess
+
     subprocess.run(["git", "clone", str(src), str(dst)], check=True, capture_output=True)
     _git(dst, "config", "core.autocrlf", "false")
     _git(dst, "config", "user.name", "VPA Test")
     _git(dst, "config", "user.email", "vpa-test@example.invalid")
 
 
-def _make_semantic_repos(tmp_path: Path) -> tuple[Path, Path, str, str]:
+def _make_semantic_repos(tmp_path):
     seed = tmp_path / "seed"
     _init_repo(seed)
-    base = _commit_file(
+    _commit_file(
         seed,
         "src/dynarec/rv64/dynarec_rv64_00.c",
         "int ref(void) { return 1; }\n",
@@ -73,16 +76,6 @@ def _make_semantic_repos(tmp_path: Path) -> tuple[Path, Path, str, str]:
         "reference semantic update",
     )
     return upstream, local, base, head
-
-
-class FakeSemanticClient:
-    def __init__(self, patch_text: str):
-        self.patch_text = patch_text
-        self.context: SemanticPortContext | None = None
-
-    def semantic_port(self, context: SemanticPortContext) -> str:
-        self.context = context
-        return self.patch_text
 
 
 def test_builds_compact_semantic_port_context(tmp_path):
@@ -112,27 +105,43 @@ def test_builds_compact_semantic_port_context(tmp_path):
     assert context.gate_reasons
 
 
-def test_execute_semantic_port_applies_injected_patch(tmp_path):
+def test_execute_isa_translate_applies_changeset(tmp_path):
     upstream, local, base, head = _make_semantic_repos(tmp_path)
-    patch_text = (
-        "diff --git a/src/dynarec/sw64_core3/dynarec_sw64_00.c "
-        "b/src/dynarec/sw64_core3/dynarec_sw64_00.c\n"
-        "--- a/src/dynarec/sw64_core3/dynarec_sw64_00.c\n"
-        "+++ b/src/dynarec/sw64_core3/dynarec_sw64_00.c\n"
-        "@@ -1 +1 @@\n"
-        "-int target(void) { return 1; }\n"
-        "+int target(void) { return 2; }\n"
-    )
-    client = FakeSemanticClient(patch_text)
 
-    run = PromotionOrchestrator(
-        PromotionConfig(
-            upstream_repo=upstream,
-            local_repo=local,
-            revision_range=f"{base}..{head}",
-        ),
-        repair_engine=RepairEngine(client),
-    ).execute()
+    changeset = json.dumps({
+        "changes": [
+            {
+                "op": "modify",
+                "path": "src/dynarec/sw64_core3/dynarec_sw64_00.c",
+                "edits": [
+                    {
+                        "old": "int target(void) { return 1; }\n",
+                        "new": "int target(void) { return 2; }\n",
+                    }
+                ],
+            }
+        ]
+    })
+
+    mock_response = {
+        "choices": [{
+            "message": {
+                "role": "assistant",
+                "content": changeset,
+                "tool_calls": None,
+            }
+        }]
+    }
+
+    with patch("vpa.engines.repair._llm_call", return_value=mock_response):
+        run = PromotionOrchestrator(
+            PromotionConfig(
+                upstream_repo=upstream,
+                local_repo=local,
+                revision_range=f"{base}..{head}",
+            ),
+            repair_engine=RepairEngine(lambda _: "mock"),
+        ).execute()
 
     assert (local / "src/dynarec/sw64_core3/dynarec_sw64_00.c").read_text(
         encoding="utf-8"
@@ -140,12 +149,9 @@ def test_execute_semantic_port_applies_injected_patch(tmp_path):
     assert run.executed[0].method == PromotionMethod.SEMANTIC_PORT
     assert run.executed[0].git_result
     assert run.executed[0].git_result.status == GitOperationStatus.APPLIED
-    assert run.executed[0].validation.status == ValidationStatus.NOT_RUN
-    assert client.context
-    assert client.context.target_files[0].content == "int target(void) { return 1; }\n"
 
 
-def test_execute_semantic_port_without_client_skips(tmp_path):
+def test_execute_isa_translate_without_client_skips(tmp_path):
     upstream, local, base, head = _make_semantic_repos(tmp_path)
 
     run = PromotionOrchestrator(

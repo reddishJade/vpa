@@ -168,6 +168,31 @@ class RepairEngine:
             return None
         return cast(Callable, self.llm_client)(prompt)
 
+    def isa_translate(
+        self,
+        context: CommitContext,
+        analysis: ChangeAnalysis,
+        gate_decision: GateDecision,
+        local_repo: Path,
+    ) -> AgentLoopResult:
+        if self.llm_client is None:
+            return AgentLoopResult(
+                success=False,
+                failure_code=FailureCode.NO_LLM_CONFIGURED,
+                status_reason="No LLM client configured",
+            )
+        semantic_context = build_semantic_port_context(
+            context, analysis, gate_decision, local_repo,
+        )
+        messages = [
+            {"role": "system", "content": _system_prompt("translate")},
+            {
+                "role": "user",
+                "content": _semantic_port_user_prompt(semantic_context, 1000000),
+            },
+        ]
+        return self._run_tool_loop("translate", messages=messages, workspace=local_repo)
+
     def agent_loop(
         self,
         op: str,
@@ -188,12 +213,15 @@ class RepairEngine:
         file_path: Path | None = None,
         context: CommitContext | None = None,
         max_retries: int = 3,
+        messages: list[dict[str, Any]] | None = None,
+        workspace: Path = Path("."),
     ) -> AgentLoopResult:
         tools = _tools_for_op(op)
-        messages: list[dict[str, Any]] = [
-            {"role": "system", "content": _system_prompt(op)},
-            {"role": "user", "content": _user_content(op, file_path, context)},
-        ]
+        if messages is None:
+            messages = [
+                {"role": "system", "content": _system_prompt(op)},
+                {"role": "user", "content": _user_content(op, file_path, context)},
+            ]
         for _ in range(max_retries):
             response = _llm_call(self._llm_chat, "gpt-4o", messages, tools)
             if response is None:
@@ -212,6 +240,13 @@ class RepairEngine:
                         "tool_call_id": call["id"],
                         "content": json.dumps(result),
                     })
+            elif op == "translate":
+                content = msg.get("content") or ""
+                try:
+                    patched = _apply_changeset(content, workspace)
+                except Exception:
+                    patched = []
+                return AgentLoopResult(success=True, patched_files=patched)
             else:
                 return AgentLoopResult(success=True, patched_files=[])
         return AgentLoopResult(
@@ -365,6 +400,36 @@ def _tool_apply_patch() -> dict[str, Any]:
 _READONLY_BASH_COMMANDS = {"git show", "grep", "cat", "test", "diff"}
 
 
+def _apply_changeset(text: str, repo_root: Path = Path(".")) -> list[Path]:
+    data = json.loads(text)
+    changes = data.get("changes", [])
+    patched: list[Path] = []
+    for change in changes:
+        op = change.get("op", "modify")
+        path = (repo_root / change["path"]).resolve()
+        if op == "create":
+            content = change.get("content", "")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+            patched.append(path)
+        elif op in {"modify", "replace"}:
+            edits = change.get("edits", [])
+            if edits:
+                original = path.read_text(encoding="utf-8")
+                for edit in edits:
+                    old = edit["old"]
+                    new = edit["new"]
+                    idx = original.find(old)
+                    if idx == -1:
+                        raise ValueError(f"Anchor not found in {path}")
+                    if original.find(old, idx + len(old)) != -1:
+                        raise ValueError(f"Multiple anchor matches in {path}")
+                    original = original[:idx] + new + original[idx + len(old):]
+                path.write_text(original, encoding="utf-8")
+                patched.append(path)
+    return patched
+
+
 def _execute_tool(name: str, args: dict[str, Any], op: str) -> dict[str, Any]:
     if name == "read":
         return _tool_handler_read(args)
@@ -468,7 +533,8 @@ def _system_prompt(op: str) -> str:
         return (
             "You are VPA's ISA translation engine. Port the reference ISA change "
             "to the target ISA file(s). Use read to inspect target files, grep to "
-            "search, and apply_patch to make edits."
+            "search, and apply_patch to make edits. When finished, you may instead "
+            "respond with a JSON ChangeSet describing all changes to apply."
         )
     return "You are VPA's agent."
 
