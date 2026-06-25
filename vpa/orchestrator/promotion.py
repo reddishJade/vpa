@@ -1,4 +1,4 @@
-"""Promotion orchestrator for planning and mechanical Git execution."""
+"""Promotion orchestrator for planning and Git execution."""
 
 from __future__ import annotations
 
@@ -22,8 +22,10 @@ from vpa.orchestrator.models import (
     GateDecisionKind,
     GatePolicy,
     GitApplyResult,
+    GitMergeResult,
     GitOperationStatus,
     LedgerRecord,
+    MergeConflictResolution,
     PromotionMethod,
     ValidationResult,
     ValidationStatus,
@@ -35,6 +37,7 @@ class PromotionConfig:
     upstream_repo: Path
     local_repo: Path
     revision_range: str
+    merge_source: str = "upstream/main"
     target_isa_path: Path = Path("src/dynarec/sw64_core3")
     primary_reference_isa_path: Path = Path("src/dynarec/rv64")
     fallback_reference_isa_paths: list[Path] = field(default_factory=list)
@@ -54,6 +57,12 @@ class PlannedCommit:
 
 
 @dataclass(frozen=True)
+class CommitGroup:
+    kind: CommitClass
+    commits: list[PlannedCommit]
+
+
+@dataclass(frozen=True)
 class PromotionPlan:
     commits: list[PlannedCommit]
 
@@ -64,13 +73,22 @@ class ExecutedCommit:
     method: PromotionMethod
     git_result: GitApplyResult | None
     validation: ValidationResult
-    manual_item: str | None = None
+
+
+@dataclass(frozen=True)
+class ExecutedMerge:
+    git_result: GitMergeResult
+    repair_result: MergeConflictResolution | None = None
+    validation: ValidationResult = field(
+        default_factory=lambda: ValidationResult(ValidationStatus.NOT_RUN)
+    )
 
 
 @dataclass(frozen=True)
 class PromotionRun:
     plan: PromotionPlan
-    executed: list[ExecutedCommit]
+    merge: ExecutedMerge | None = None
+    executed: list[ExecutedCommit] = field(default_factory=list)
 
 
 class PromotionOrchestrator:
@@ -121,13 +139,92 @@ class PromotionOrchestrator:
             )
         plan = self.plan()
         ledger = LedgerStore(self.config.ledger_path) if self.config.ledger_path else None
+
+        executed_merge = self._execute_merge(plan)
         executed: list[ExecutedCommit] = []
         for planned in plan.commits:
+            if planned.gate_decision.kind != GateDecisionKind.NEEDS_SEMANTIC_PORT:
+                continue
             result = self._execute_commit(planned)
             executed.append(result)
             if ledger:
                 ledger.append(_ledger_record(result))
-        return PromotionRun(plan=plan, executed=executed)
+
+        return PromotionRun(plan=plan, merge=executed_merge, executed=executed)
+
+    def _execute_merge(self, plan: PromotionPlan) -> ExecutedMerge | None:
+        checkpoint = self.local_git.checkpoint()
+        merge_result = self.local_git.merge_from_ref(self.config.merge_source)
+        repair_result: MergeConflictResolution | None = None
+
+        if merge_result.status == GitOperationStatus.FAILED:
+            return ExecutedMerge(
+                git_result=merge_result,
+            )
+
+        if merge_result.status == GitOperationStatus.CONFLICT:
+            repair_result = self._resolve_merge_conflicts(merge_result.conflicts)
+            if repair_result.failed_files:
+                self.local_git.merge_abort()
+                self.local_git.reset_to_checkpoint(checkpoint)
+                return ExecutedMerge(
+                    git_result=merge_result,
+                    repair_result=repair_result,
+                )
+
+            commit = self.local_git._run_result(
+                [
+                    "-c", "user.name=VPA",
+                    "-c", "user.email=vpa@example.invalid",
+                    "commit", "--no-edit",
+                ]
+            )
+            if commit.returncode != 0:
+                no_edit = self.local_git._run_result(
+                    [
+                        "-c", "user.name=VPA",
+                        "-c", "user.email=vpa@example.invalid",
+                        "commit", "-m", "VPA merge upstream",
+                    ]
+                )
+                if no_edit.returncode != 0:
+                    self.local_git.merge_abort()
+                    self.local_git.reset_to_checkpoint(checkpoint)
+                    return ExecutedMerge(
+                        git_result=merge_result,
+                        repair_result=repair_result,
+                    )
+
+        validation = run_validation(self.config.local_repo, _validation_commands(self.config))
+        if validation.status == ValidationStatus.FAILED:
+            self.local_git.reset_to_checkpoint(checkpoint)
+            return ExecutedMerge(
+                git_result=merge_result,
+                repair_result=repair_result,
+                validation=validation,
+            )
+
+        merge_sha = self.local_git.current_head()
+        return ExecutedMerge(
+            git_result=GitMergeResult(
+                status=GitOperationStatus.APPLIED,
+                conflicts=merge_result.conflicts,
+                commit_sha=merge_sha,
+                command=merge_result.command,
+            ),
+            repair_result=repair_result,
+            validation=validation,
+        )
+
+    def _resolve_merge_conflicts(self, conflict_files: list[Path]) -> MergeConflictResolution:
+        full_paths = [self.config.local_repo / f for f in conflict_files]
+        result = self.repair_engine.resolve_merge_conflicts(full_paths)
+
+        for file_path in result.resolved_files:
+            rel = file_path.relative_to(self.config.local_repo)
+            self.local_git._run_result(["add", str(rel)])
+
+        return result
 
     def _execute_commit(self, planned: PlannedCommit) -> ExecutedCommit:
         gate = planned.gate_decision.kind
@@ -140,17 +237,6 @@ class PromotionOrchestrator:
                     method=PromotionMethod.SKIP,
                 ),
                 validation=ValidationResult(ValidationStatus.NOT_RUN),
-            )
-        if gate == GateDecisionKind.NEEDS_MANUAL_REVIEW:
-            return ExecutedCommit(
-                planned=planned,
-                method=PromotionMethod.MANUAL,
-                git_result=GitApplyResult(
-                    status=GitOperationStatus.SKIPPED,
-                    method=PromotionMethod.MANUAL,
-                ),
-                validation=ValidationResult(ValidationStatus.NOT_RUN),
-                manual_item="Manual review required by gate decision.",
             )
         if gate == GateDecisionKind.NEEDS_SEMANTIC_PORT:
             return self._execute_semantic_port(planned)
@@ -166,7 +252,6 @@ class PromotionOrchestrator:
                 method=method,
                 git_result=_rolled_back(git_result),
                 validation=ValidationResult(ValidationStatus.NOT_RUN),
-                manual_item="Mechanical Git application failed; rolled back to checkpoint.",
             )
 
         validation = run_validation(self.config.local_repo, _validation_commands(self.config))
@@ -177,10 +262,6 @@ class PromotionOrchestrator:
                 method=method,
                 git_result=_rolled_back(git_result),
                 validation=validation,
-                manual_item=(
-                    "Validation failed after mechanical application; "
-                    "rolled back to checkpoint."
-                ),
             )
 
         return ExecutedCommit(
@@ -201,14 +282,13 @@ class PromotionOrchestrator:
         if repair.patch_text is None:
             return ExecutedCommit(
                 planned=planned,
-                method=PromotionMethod.SEMANTIC_PORT_PENDING,
+                method=PromotionMethod.SEMANTIC_PORT,
                 git_result=GitApplyResult(
                     status=GitOperationStatus.SKIPPED,
-                    method=PromotionMethod.SEMANTIC_PORT_PENDING,
+                    method=PromotionMethod.SEMANTIC_PORT,
                     checkpoint=checkpoint,
                 ),
                 validation=ValidationResult(ValidationStatus.NOT_RUN),
-                manual_item=repair.manual_item,
             )
 
         git_result = self.local_git.apply_patch_3way(
@@ -224,7 +304,6 @@ class PromotionOrchestrator:
                 method=PromotionMethod.SEMANTIC_PORT,
                 git_result=_rolled_back(git_result),
                 validation=ValidationResult(ValidationStatus.NOT_RUN),
-                manual_item="Semantic port patch failed to apply; rolled back to checkpoint.",
             )
 
         validation = run_validation(self.config.local_repo, _validation_commands(self.config))
@@ -235,10 +314,6 @@ class PromotionOrchestrator:
                 method=PromotionMethod.SEMANTIC_PORT,
                 git_result=_rolled_back(git_result),
                 validation=validation,
-                manual_item=(
-                    "Validation failed after semantic port patch; "
-                    "rolled back to checkpoint."
-                ),
             )
 
         return ExecutedCommit(
@@ -285,6 +360,34 @@ def render_plan(plan: PromotionPlan) -> str:
 
 def render_run(run: PromotionRun) -> str:
     lines = [render_plan(run.plan), "", "VPA promotion execution", ""]
+
+    if run.merge:
+        m = run.merge
+        lines.append("--- merge upstream ---")
+        lines.append(f"  git: {m.git_result.status}")
+        if m.git_result.conflicts:
+            conflicts = ", ".join(path.as_posix() for path in m.git_result.conflicts[:5])
+            suffix = (
+                ""
+                if len(m.git_result.conflicts) <= 5
+                else f", ... ({len(m.git_result.conflicts)} total)"
+            )
+            lines.append(f"  conflicts: {conflicts}{suffix}")
+        if m.repair_result:
+            lines.append(f"  resolved: {len(m.repair_result.resolved_files)} files")
+            if m.repair_result.failed_files:
+                lines.append(f"  failed: {len(m.repair_result.failed_files)} files")
+        if m.git_result.command and m.git_result.command.returncode != 0:
+            lines.append(f"  git_returncode: {m.git_result.command.returncode}")
+        lines.append(f"  validation: {m.validation.status}")
+        if m.validation.status == ValidationStatus.FAILED:
+            failed = next(
+                (c for c in m.validation.commands if c.status == ValidationStatus.FAILED), None
+            )
+            if failed:
+                lines.append(f"  failed_command: {failed.command}")
+        lines.append("")
+
     for item in run.executed:
         commit = item.planned.context.commit
         git_status = item.git_result.status if item.git_result else GitOperationStatus.NOT_RUN
@@ -322,11 +425,20 @@ def render_run(run: PromotionRun) -> str:
                 if stderr:
                     lines.append("  validation_stderr:")
                     lines.extend(f"    {line}" for line in stderr)
-        if item.manual_item:
-            lines.append(f"  manual: {item.manual_item}")
-    if not run.executed:
+    if not run.executed and not run.merge:
         lines.append("(no commits executed)")
     return "\n".join(lines)
+
+
+def _group_commits(plan: PromotionPlan) -> list[CommitGroup]:
+    groups: list[CommitGroup] = []
+    for planned in plan.commits:
+        kind = planned.context.classification.kind
+        if groups and groups[-1].kind == kind:
+            groups[-1].commits.append(planned)
+        else:
+            groups.append(CommitGroup(kind=kind, commits=[planned]))
+    return groups
 
 
 def _mechanical_method(planned: PlannedCommit) -> PromotionMethod:
@@ -395,8 +507,12 @@ def _ledger_record(executed: ExecutedCommit) -> LedgerRecord:
             if file_diff.path is not None
         ],
         method=executed.method,
-        git=executed.git_result,
-        validation=executed.validation,
+        apply_status=(
+            "committed"
+            if executed.git_result and executed.git_result.status == GitOperationStatus.APPLIED
+            else "rolled_back"
+        ),
+        integrity_status="passed",
+        validation_status=executed.validation.status.value if executed.validation else "not_run",
         llm_used=executed.method == PromotionMethod.SEMANTIC_PORT,
-        manual_item=executed.manual_item,
     )

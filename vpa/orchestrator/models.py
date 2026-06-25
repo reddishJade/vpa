@@ -68,7 +68,6 @@ class GateDecisionKind(StrEnum):
     NO_TARGET_CHANGE = "no_target_change"
     NEEDS_VALIDATION_ONLY = "needs_validation_only"
     NEEDS_SEMANTIC_PORT = "needs_semantic_port"
-    NEEDS_MANUAL_REVIEW = "needs_manual_review"
 
 
 class RiskPreference(StrEnum):
@@ -84,6 +83,21 @@ class ValidationStatus(StrEnum):
     ERROR = "error"
 
 
+class FailureCode(StrEnum):
+    MAX_RETRIES = "max_retries"
+    INTEGRITY_FAIL = "integrity_fail"
+    LLM_ERROR = "llm_error"
+    NO_LLM_CONFIGURED = "no_llm_configured"
+
+
+@dataclass(frozen=True)
+class AgentLoopResult:
+    success: bool
+    failure_code: FailureCode | None = None
+    status_reason: str | None = None
+    patched_files: list[Path] = field(default_factory=list)
+
+
 class GitOperationStatus(StrEnum):
     NOT_RUN = "not_run"
     APPLIED = "applied"
@@ -97,9 +111,8 @@ class PromotionMethod(StrEnum):
     SKIP = "skip"
     CHERRY_PICK = "cherry_pick"
     PATH_LIMITED_APPLY_3WAY = "path_limited_apply_3way"
-    MANUAL = "manual"
     SEMANTIC_PORT = "semantic_port"
-    SEMANTIC_PORT_PENDING = "semantic_port_pending"
+    MERGE = "merge"
 
 
 @dataclass(frozen=True)
@@ -209,8 +222,6 @@ class ChangeAnalysis:
 
 @dataclass(frozen=True)
 class GatePolicy:
-    semantic_confidence_threshold: float = 0.65
-    manual_confidence_threshold: float = 0.4
     risk_preference: RiskPreference = RiskPreference.BALANCED
     dry_run: bool = False
     project_overrides: dict[str, str] = field(default_factory=dict)
@@ -220,7 +231,6 @@ class GatePolicy:
 class GateDecision:
     kind: GateDecisionKind
     reasons: list[str]
-    confidence: float
 
 
 @dataclass(frozen=True)
@@ -259,6 +269,14 @@ class GitApplyResult:
 
 
 @dataclass(frozen=True)
+class GitMergeResult:
+    status: GitOperationStatus
+    conflicts: list[Path] = field(default_factory=list)
+    command: GitCommandResult | None = None
+    commit_sha: str | None = None
+
+
+@dataclass(frozen=True)
 class TargetFileContext:
     path: Path
     content: str | None
@@ -278,7 +296,12 @@ class SemanticPortResult:
     patch_text: str | None
     context: SemanticPortContext
     llm_used: bool = False
-    manual_item: str | None = None
+
+
+@dataclass(frozen=True)
+class MergeConflictResolution:
+    resolved_files: list[Path] = field(default_factory=list)
+    failed_files: list[Path] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -288,7 +311,8 @@ class LedgerRecord:
     gate: GateDecisionKind
     changed_files: list[Path]
     method: PromotionMethod = PromotionMethod.SKIP
-    git: GitApplyResult | None = None
-    validation: ValidationResult | None = None
+    apply_status: str = "not_run"
+    apply_reason: str | None = None
+    integrity_status: str = "not_run"
+    validation_status: str = "not_run"
     llm_used: bool = False
-    manual_item: str | None = None

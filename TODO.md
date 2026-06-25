@@ -1,251 +1,175 @@
 # VPA TODO
 
-This document turns the current design in `DESIGN.md` and `AGENTS.md` into an
-implementation checklist. It is phase-oriented: each phase is a prerequisite for
-the next one, not an isolated delivery target.
+Implementation checklist matching [DESIGN.md](DESIGN.md) and [PHASES.md](PHASES.md).
+Phases are sequential. Each phase depends on the previous.
 
-These phases define the first usable MVP, not the full completion of VPA. Phase
-3 means the reference-ISA semantic-port path has a minimal working loop; it does
-not mean VPA is finished.
+## Document References
 
-## Current Constraints
+All design decisions and motivation are in `DESIGN.md`. Detailed per-step code
+changes are in `PHASES.md`. This file tracks what is done and what remains.
 
-- Build the new `vpa` workflow, not a V2 patch over the old per-file agent loop.
-- Keep Git as a first-class engine.
-- Do not use LLM calls for bookkeeping, routine Git state, or per-file progress
-  transitions.
-- Call the LLM only after the workflow exposes a semantic gap, a conflict, or a
-  focused validation failure.
-- Keep `box64-2-sw64/` and `box64_2_sw64.tar.gz` out of commits unless a task
-  explicitly asks for them.
+## Phase 1: Core Infrastructure Cleanup + Agent Loop
 
-## Open Design Cleanup
+**Goal**: remove the broken `_fallback_to_ours`, `manual_item`, `confidence`/`threshold`
+machinery; replace with the agent loop (function calling) and five tools; update
+ledger format to three-axis state.
 
-wsl
-- [x] Standardize gate decision naming across docs and code before Phase 1
-      implementation. Preferred enum: `needs_validation_only`.
-- [x] Decide how to handle the existing top-level legacy modules that conflict
-      with the target package layout, especially `vpa/ledger.py` vs
-      `vpa/ledger/`.
-- [x] Decide whether legacy modules should move under a `legacy/` namespace or
-      remain untouched until replaced.
-- [x] Move persistent project defaults into a TOML config file instead of
-      requiring long repeated CLI commands.
+### P1.1: Delete `_fallback_to_ours` (`engines/repair.py`)
 
-## Phase 1: Skeleton And CLI
+- [x] Remove the `_fallback_to_ours()` function
+- [x] Remove its call in `resolve_merge_conflicts()`
 
-Goal: establish the new workflow shape without LLM dependency.
+### P1.2: Delete all confidence/threshold/manual_item/MANUAL/NEEDS_MANUAL_REVIEW
 
-### Package Layout
+Completed across all files:
 
-- [x] Create `vpa/orchestrator/`.
-- [x] Create `vpa/orchestrator/models.py`.
-- [x] Create `vpa/orchestrator/promotion.py`.
-- [x] Create `vpa/orchestrator/llm_gate.py`.
-- [x] Create `vpa/engines/`.
-- [x] Create `vpa/engines/git.py`.
-- [x] Create `vpa/engines/validation.py`.
-- [x] Create `vpa/engines/repair.py`.
-- [x] Create `vpa/analysis/`.
-- [x] Create `vpa/analysis/classifier.py`.
-- [x] Create `vpa/analysis/change_analyzer.py`.
-- [x] Create `vpa/analysis/isa_mapper.py`.
-- [x] Create the new ledger/report package after resolving the legacy
-      `vpa/ledger.py` naming conflict.
+| File | Changes |
+|---|---|
+| `models.py` | Removed `GatePolicy.manual_confidence_threshold`, `LedgerRecord.manual_item`, `SemanticPortResult.manual_item`, `ExecutedCommit.manual_item`, `ExecutedMerge.manual_item`, `GateDecisionKind.NEEDS_MANUAL_REVIEW`, `PromotionMethod.MANUAL`, `PromotionMethod.SEMANTIC_PORT_PENDING`, `GateDecision.confidence` |
+| `llm_gate.py` | Removed `NEEDS_MANUAL_REVIEW` return path and confidence threshold comparison |
+| `config.py` | Removed `manual_confidence_threshold` from `VPASettings` and `settings_from_dict` |
+| `main.py` | Removed `--manual-confidence-threshold` CLI arg and policy construction |
+| `promotion.py` | Removed all `manual_item` field references, `NEEDS_MANUAL_REVIEW` gate handler, `SEMANTIC_PORT_PENDING` usage |
+| `repair.py` | Removed `threshold` param, `confidence`/`confidences` fields, `manual_item` references |
 
-### Core Models
+### P1.3: Add `AgentLoopResult` + `FailureCode` (`models.py`)
 
-- [x] Define `CommitInfo`.
-- [x] Define `DiffContext`.
-- [x] Define `FileDiff`.
-- [x] Define `DiffHunk`.
-- [x] Define `DiffLine`.
-- [x] Define `BaseCommitContext` for `CommitInfo + DiffContext`.
-- [x] Define full `CommitContext` for commit, diff, classification, and
-      mapping.
-- [x] Define `ClassifiedCommit`.
-- [x] Define commit/file classification enums.
-- [x] Define `MappingResult` and per-file `FileMapping`.
-- [x] Define `ChangeSignal`.
-- [x] Define `ChangeAnalysis`.
-- [x] Define `GatePolicy`.
-- [x] Define `GatePolicy` fields: confidence thresholds, risk preference,
-      dry-run flag, and per-project overrides.
-- [x] Define `GateDecision`.
-- [x] Define validation and ledger result records.
+- [x] Define `FailureCode(StrEnum)` with `MAX_RETRIES`, `INTEGRITY_FAIL`, `LLM_ERROR`, `NO_LLM_CONFIGURED`
+- [x] Define `AgentLoopResult` dataclass with `success`, `failure_code`, `status_reason`, `patched_files`
 
-### CLI
+### P1.4: Implement `_run_tool_loop()` + `agent_loop()` (`engines/repair.py`)
 
-- [x] Add CLI options for upstream repo.
-- [x] Add CLI options for local repo.
-- [x] Add CLI options for revision range.
-- [x] Add CLI options for target ISA path.
-- [x] Add CLI options for primary reference ISA path.
-- [x] Add CLI options for fallback reference ISA paths.
-- [x] Add CLI options for build command.
-- [x] Add CLI options for smoke/test commands.
-- [x] Add dry-run mode.
-- [x] Add output paths for ledger/report artifacts.
+- [x] `_run_tool_loop()`: message loop with function calling, tool dispatch, integrity check, max retries
+- [x] `agent_loop()`: public entry point dispatching to `resolve` or `translate` operations
 
-### Git Read Path
+### P1.5: Implement five tools (`engines/repair.py`)
 
-- [x] Enumerate upstream commits in revision order.
-- [x] Read commit metadata into `CommitInfo`.
-- [x] Read raw patch text.
-- [x] Parse raw patch into `DiffContext`, `FileDiff`, `DiffHunk`, and
-      `DiffLine`.
-- [x] Keep raw patch text available for provenance, ledger records, debugging,
-      and future LLM context.
+- [x] `read(path, line_range?)` — file content with optional line slicing
+- [x] `grep(pattern, path)` — read-only regex search
+- [x] `bash(cmd)` — read-only shell commands (git show :1:/:2:/:3:, grep, cat, test, diff only)
+- [x] `write(path, content)` — complete file write (resolve op only)
+- [x] `apply_patch(path, patch_text)` — structured diff with anchor matching (translate op only)
 
-### Classifier
+### P1.6: Update `LedgerRecord` to three-axis state (`models.py`, `ledger/store.py`)
 
-- [x] Classify `shared_code`.
-- [x] Classify `reference_isa_change`.
-- [x] Classify `target_isa_direct`.
-- [x] Classify `cross_cutting`.
-- [x] Classify `generated_or_vendor`.
-- [x] Classify `unknown`.
-- [x] Keep classification separate from LLM gate decisions.
+- [x] Replace old `git`/`validation` fields with: `apply_status`, `apply_reason`, `integrity_status`, `validation_status`
+- [x] Remove `manual_item` from `LedgerRecord`
+- [ ] Add `MergeLedgerRecord` for merge-specific records (Phase 2)
 
-### ISA Mapper
+### P1.7: Clean up `PromotionMethod` (`models.py`)
 
-- [x] Implement path-only mapping from `src/dynarec/rv64/` to
-      `src/dynarec/sw64_core3/`.
-- [x] Implement filename transforms:
-      `dynarec_rv64_* -> dynarec_sw64_*`.
-- [x] Implement filename transforms:
-      `rv64_* -> sw64_*`.
-- [x] Return per-file mapping status: `mapped`, `missing_target`, `ambiguous`,
-      or `not_reference_file`.
-- [x] Preserve API room for later symbol mapping without implementing it now.
+- [x] Remove `MANUAL`, `SEMANTIC_PORT_PENDING`
+- [x] Keep `SKIP`, `CHERRY_PICK`, `PATH_LIMITED_APPLY_3WAY`, `SEMANTIC_PORT`, `MERGE`
 
-### Change Analyzer
+### P1.8: Add `CommitGroup` + `_group_commits()` support
 
-- [x] Implement explicit analyzer chain registration.
-- [x] Implement sub-analyzer interface that only emits `ChangeSignal`.
-- [x] Implement aggregator that owns `kind`, `confidence`, and
-      `suggested_gate`.
-- [x] Implement aggregator rules: highest-risk kind wins; multiple meaningful
-      kinds collapse to `mixed`; signals retain full detail regardless of final
-      kind.
-- [x] Implement diff-text analyzer.
-- [x] Implement normalization analyzer for blank lines, comments, and practical
-      formatting noise.
-- [x] Implement conservative symbol/signature text analyzer.
-- [x] Detect comment-only changes.
-- [x] Detect whitespace/format-only changes.
-- [x] Detect metadata/include-only changes.
-- [x] Detect likely runtime semantic patterns: branches, returns, assignments,
-      macro definitions, helper calls, opcode tables, constants, flag updates,
-      and data-structure changes.
-- [x] Define the initial risk order used by the aggregator.
-- [x] Ensure Phase 1 works without libclang, tree-sitter, compiler
-      databases, or macro expansion.
+- [x] Define `CommitGroup` dataclass: `kind: CommitClass`, `commits: list[PlannedCommit]`
+- [x] Implement `_group_commits(plan) -> list[CommitGroup]` in `promotion.py`
+- [x] Reuse `CommitClass` for grouping (no separate `CommitGroupKind` needed)
 
-### LLM Gate
+### P1.9: Update tests
 
-- [x] Implement pure `llm_gate.decide(change_analysis, policy, context)`.
-- [x] Ensure gate does not mutate worktree, read config, call Git, or call an
-      LLM.
-- [x] Route non-semantic reference changes to `no_target_change`.
-- [x] Route obvious semantic reference changes with mapped targets to
-      `needs_semantic_port`.
-- [x] Route semantic reference changes with missing/ambiguous target mapping to
-      `needs_manual_review`.
-- [x] Route shared or target-direct changes to `needs_validation_only` without
-      LLM semantic porting.
-- [x] Preserve gate reasons for ledger/report output.
+- [x] `test_phase1_workflow.py` — no `NEEDS_MANUAL_REVIEW` refs remained
+- [x] `test_phase2_mechanical_git.py` — removed `manual_item` assertions, `fallback_files` → `failed_files`, `SEMANTIC_PORT_PENDING` → `SEMANTIC_PORT`
+- [x] `test_phase3_semantic_port.py` — removed `manual_item` assertion, `SEMANTIC_PORT_PENDING` → `SEMANTIC_PORT`
+- [x] `test_ledger_store.py` — updated record format to three-axis, removed `manual_item`
 
-### Ledger And Report
+### P1.10: Run `ruff` + `pyright` + `pytest`
 
-- [x] Implement append-only result records.
-- [ ] Record commit, subject, classification, method, changed files, reference
-      context, target context, validation result, LLM use, and manual item.
-- [x] Keep ledger independent from execution control.
-- [x] Generate a human-readable summary report.
-- [x] Generate a machine-readable report artifact.
+- [x] `ruff check .` — All checks passed
+- [x] `pyright` — 0 errors, 0 warnings, 0 informations
+- [x] `pytest` — 20 passed in 1.38s
 
-### Phase 1 Tests
+---
 
-- [x] Test CLI argument parsing.
-- [x] Test commit/file classification.
-- [x] Test raw patch plus parsed hunk `DiffContext`.
-- [x] Test staged context construction without optional half-filled fields.
-- [x] Test `rv64` to `sw64_core3` path mapping.
-- [x] Test per-file `MappingResult`.
-- [x] Test missing mapped target files.
-- [x] Test comment-only and format-only change analysis.
-- [x] Test obvious semantic diff analysis.
-- [x] Test signal source recording.
-- [x] Test gate decisions.
-- [x] Test operation without AST dependencies.
-- [x] Test ledger record serialization.
+## Phase 2: Merge Conflict Stratified Resolution
 
-## Phase 2: Mechanical Git Path
+**Goal**: replace the current `_execute_merge` which used `_fallback_to_ours`
+globally with the per-file stratified strategy.
 
-Goal: run Git-first promotion end to end for commits that do not require
-semantic porting.
+### P2.1: File category classifier
 
-- [x] Create one orchestrator checkpoint per upstream commit.
-- [ ] Implement temporary work branch support.
-- [x] Implement cherry-pick path.
-- [x] Implement path-limited patch application where useful.
-- [x] Define path-limited patch policy in the orchestrator: use classifier
-      results and gate decisions to choose path-limited application; keep the
-      Git engine as the executor, not the policy owner.
-- [x] Implement `git apply -3` fallback.
-- [x] Detect textual conflicts.
-- [x] Abort back to the current commit checkpoint.
-- [x] Run configured build command.
-- [x] Run configured smoke/test commands.
-- [x] Record success, conflict, validation failure, rollback, or manual result.
-- [x] Add tests with small temporary Git repositories.
+- [ ] Add `ConflictCategory` enum: `ISA_BACKEND`, `NON_SOURCE`, `SOURCE`
+- [ ] Add `classify_conflict_file(path)` in `analysis/classifier.py`
 
-## Phase 3: Reference ISA To Target ISA Semantic Mapping
+### P2.2: ISA backend → `checkout --theirs` + ledger
 
-Goal: handle `rv64` changes that imply `sw64_core3` work.
+- [ ] `_resolve_isa_conflict(path)` — `git checkout --theirs` + `git add`
 
-- [x] Detect reference-ISA-only commits.
-- [x] Map touched reference files to target candidates.
-- [x] Build compact semantic-port context from reference diff and target file.
-- [x] Inject LLM client into `engines/repair.py`.
-- [x] Ask LLM for patch-oriented semantic port output only after gate approval.
-- [x] Apply proposed target-side patch through a controlled patch path.
-- [x] Validate patched target state.
-- [x] Record manual items when mapping is unsafe.
-- [x] Add tests for semantic-port context construction without requiring the
-      large `box64-2-sw64` fixture.
+### P2.3: Non-source files → agent loop + ledger
+
+- [ ] `_resolve_non_source_conflict(path)` — agent loop, fallback to theirs
+
+### P2.4: Source files → agent loop + ledger
+
+- [ ] `_resolve_source_conflict(path)` — agent loop, exhausted on failure
+
+### P2.5: Integrate into `_execute_merge`
+
+- [ ] Replace `_fallback_to_ours` loop with per-file stratified dispatch
+- [ ] Roll back entire merge if any source file is exhausted
+- [ ] Record `MergeLedgerRecord` on completion
+
+---
+
+## Phase 3: ISA Translation Agent + Grouped Execution Loop
+
+**Goal**: replace `_execute_semantic_port` with agent loop using `isa_translate`
+op and structured ChangeSet output. Wire grouped execution into `execute()`.
+
+### P3.1: Refactor `execute()` to grouped loop
+
+- [ ] Replace flat `for commit in plan.commits` with `for group in groups`
+- [ ] `SHARED_CODE` group → one merge call
+- [ ] `REFERENCE_ISA_CHANGE` group → per-commit ISA translation, per-commit checkpoint
+- [ ] `TARGET_ISA_DIRECT` group → per-commit path-limited apply, per-commit checkpoint
+- [ ] Group-level validation after each group completes
+
+### P3.2: `isa_translate` agent loop
+
+- [ ] Add operation type to `RepairEngine` for ISA translation
+- [ ] Implement `_execute_isa_translate()` in `promotion.py` replacing `_execute_semantic_port()`
+
+### P3.3: ChangeSet parsing and application
+
+- [ ] Parse LLM output as structured ChangeSet (`op: modify|create`, `path`, `edits`/`content`)
+- [ ] Validate each edit: exact anchor match, single hit required
+- [ ] Apply in memory, verify no conflict markers, compute before/after hash
+- [ ] Write via temp file + atomic rename
+
+### P3.4: Per-commit three-axis ledger
+
+- [ ] Wire `LedgerRecord` into `execute()` per-ISA-translated commit
+- [ ] `render_run` displays apply/integrity/validation status
+
+### P3.5: Update `render_run` for groups and three-axis display
+
+- [ ] Show group boundaries in output
+- [ ] Show apply/integrity/validation per commit
+
+---
 
 ## Phase 4: Range Recovery And Operational MVP
 
-Goal: make the MVP usable on real upstream ranges without restarting from
-scratch after the first failure.
+**Goal**: persist progress, resume interrupted runs, detect worktree drift.
 
-- [ ] Persist per-commit progress in the ledger or a separate run-state file.
-- [ ] Resume a partially completed commit range from the last successful
-      checkpoint.
-- [ ] Skip or continue past manual commits according to explicit policy.
-- [ ] Detect when the local worktree no longer matches the recorded safe point.
-- [ ] Record enough checkpoint metadata to explain and recover failed runs.
-- [ ] Add tests for interrupted runs and resumed ranges.
+- [ ] Persist per-commit progress in ledger or run-state file
+- [ ] Resume partially completed run from last successful checkpoint
+- [ ] Detect worktree mismatch with recorded safe point
+- [ ] Record enough metadata to explain and recover failed runs
 
-## Post-MVP Roadmap
+---
 
-- [ ] Add optional AST analyzer as an explicit registered analyzer.
-- [ ] Add symbol-name mapping from reference symbols to target candidates.
-- [ ] Add confidence improvements from normalized AST equivalence.
-- [ ] Replace fixed heuristic confidence constants with a calibrated scoring
-      model based on signal count, file scope, hunk scope, analyzer agreement,
-      and explicit uncertainty reasons.
-- [ ] Expose signal provenance in plan output so scores are explainable instead
-      of opaque constants like `0.82`.
-- [ ] Add richer file-to-test policy tables.
-- [ ] Add targeted test inference after configured validation is stable.
-- [ ] Add fallback reference triangulation using `la64` and `arm64`.
-- [ ] Add validation-repair retry policy with one focused repair attempt.
-- [ ] Add conflict-resolution repair path.
-- [ ] Add integration tests against a reduced fixture derived from
-      `box64-2-sw64`.
+## Post-MVP
+
+- [ ] Optional AST analyzer (libclang/tree-sitter when available)
+- [ ] Symbol-name mapping beyond path convention
+- [ ] Fallback reference triangulation (la64, arm64)
+- [ ] Validation-repair retry policy
+- [ ] Conflict-resolution repair path
+- [ ] Integration tests against reduced fixture
+
+---
 
 ## Definition Of Done
 
@@ -253,6 +177,5 @@ scratch after the first failure.
 - [ ] `uv run pyright`
 - [ ] `uv run pytest`
 - [ ] `git diff --check`
-- [ ] Only intended files are staged.
-- [ ] `box64-2-sw64/` and `box64_2_sw64.tar.gz` remain untracked unless
-      explicitly requested.
+- [ ] Only intended files are staged
+- [ ] `box64-2-sw64/` and `box64_2_sw64.tar.gz` remain untracked unless explicitly requested

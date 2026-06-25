@@ -220,12 +220,7 @@ def aggregate(signals: list[ChangeSignal], isa_mapping: MappingResult) -> Change
 def _suggest_gate(kind: ChangeKind, isa_mapping: MappingResult) -> GateDecisionKind:
     if kind in {ChangeKind.COMMENT_ONLY, ChangeKind.FORMAT_ONLY, ChangeKind.METADATA_ONLY}:
         return GateDecisionKind.NO_TARGET_CHANGE
-    unsafe_statuses = {MappingStatus.MISSING_TARGET, MappingStatus.AMBIGUOUS}
-    if any(mapping.status in unsafe_statuses for mapping in isa_mapping.file_mappings):
-        return GateDecisionKind.NEEDS_MANUAL_REVIEW
-    if any(mapping.status == MappingStatus.MAPPED for mapping in isa_mapping.file_mappings):
-        return GateDecisionKind.NEEDS_SEMANTIC_PORT
-    return GateDecisionKind.NEEDS_VALIDATION_ONLY
+    return GateDecisionKind.NEEDS_SEMANTIC_PORT
 
 
 def _mapped_targets(isa_mapping: MappingResult) -> list[Path]:

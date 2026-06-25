@@ -145,7 +145,7 @@ def test_execute_semantic_port_applies_injected_patch(tmp_path):
     assert client.context.target_files[0].content == "int target(void) { return 1; }\n"
 
 
-def test_execute_semantic_port_without_client_records_manual_item(tmp_path):
+def test_execute_semantic_port_without_client_skips(tmp_path):
     upstream, local, base, head = _make_semantic_repos(tmp_path)
 
     run = PromotionOrchestrator(
@@ -159,7 +159,6 @@ def test_execute_semantic_port_without_client_records_manual_item(tmp_path):
     assert (local / "src/dynarec/sw64_core3/dynarec_sw64_00.c").read_text(
         encoding="utf-8"
     ) == "int target(void) { return 1; }\n"
-    assert run.executed[0].method == PromotionMethod.SEMANTIC_PORT_PENDING
+    assert run.executed[0].method == PromotionMethod.SEMANTIC_PORT
     assert run.executed[0].git_result
     assert run.executed[0].git_result.status == GitOperationStatus.SKIPPED
-    assert run.executed[0].manual_item

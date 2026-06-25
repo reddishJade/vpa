@@ -32,10 +32,9 @@ class VPASettings:
     fallback_reference_isa_paths: list[Path] = field(default_factory=list)
     build_command: str | None = None
     smoke_commands: list[str] = field(default_factory=list)
+    merge_source: str = "upstream/main"
     ledger_path: Path | None = None
     report_path: Path | None = None
-    semantic_confidence_threshold: float = 0.65
-    manual_confidence_threshold: float = 0.4
     risk_preference: str = "balanced"
     llm: LLMSettings = field(default_factory=LLMSettings)
 
@@ -60,6 +59,7 @@ def settings_from_dict(data: dict[str, Any]) -> VPASettings:
     return VPASettings(
         upstream_repo=_optional_path(promotion.get("upstream_repo")),
         local_repo=_optional_path(promotion.get("local_repo")),
+        merge_source=str(promotion.get("merge_source", "upstream/main")),
         target_isa_path=_path(isa.get("target_isa_path"), "src/dynarec/sw64_core3"),
         reference_isa_path=_path(isa.get("reference_isa_path"), "src/dynarec/rv64"),
         fallback_reference_isa_paths=[
@@ -69,8 +69,6 @@ def settings_from_dict(data: dict[str, Any]) -> VPASettings:
         smoke_commands=_string_list(validation.get("smoke_commands")),
         ledger_path=_optional_path(output.get("ledger_path")),
         report_path=_optional_path(output.get("report_path")),
-        semantic_confidence_threshold=float(gate.get("semantic_confidence_threshold", 0.65)),
-        manual_confidence_threshold=float(gate.get("manual_confidence_threshold", 0.4)),
         risk_preference=str(gate.get("risk_preference", "balanced")),
         llm=LLMSettings(
             model=_optional_string(llm.get("model")),

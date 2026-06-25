@@ -1,6 +1,7 @@
 [promotion]
 upstream_repo = "box64-2-sw64"
 local_repo = "box64-2-sw64"
+merge_source = "upstream/main"
 
 [isa]
 reference_isa_path = "src/dynarec/rv64"

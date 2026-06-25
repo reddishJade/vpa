@@ -61,7 +61,8 @@ old agent harness or creating more top-level modules.
 
 Ownership boundaries:
 
-- `orchestrator/` owns the commit loop, routing, safe points, and LLM gate.
+- `orchestrator/` owns the commit loop, routing, safe points, group execution, and LLM gate.
+- `orchestrator/models.py` owns shared workflow records, enums, and gate policy.
 - `orchestrator/llm_gate.py` owns pure gate decisions from analysis plus policy.
 - `engines/git.py` owns Git operations and conflict detection.
 - `engines/validation.py` owns build/test execution.
@@ -183,6 +184,54 @@ MappingResult
 This lets `llm_gate` distinguish all mapped, partially mapped, and fully
 unmapped commits.
 
+### Commit Grouping
+
+Commits are executed in upstream order, grouped by consecutive same
+classification. Each group becomes one execution unit with its own checkpoint
+and validation:
+
+```text
+upstream commits (after classification):
+  [A(shared), B(shared), C(ref_isa), D(shared), E(shared), F(ref_isa)]
+
+groups:
+  group_1: [A, B]      → merge path (shared_code)
+  group_2: [C]         → ISA translation path (reference_isa_change)
+  group_3: [D, E]      → merge path (shared_code)
+  group_4: [F]         → ISA translation path (reference_isa_change)
+```
+
+Group boundaries are determined by classification transitions. The group type
+determines the execution path:
+
+| Group type | Execution path | Rollback granularity | Validation |
+|---|---|---|---|
+| `shared_code` | `git merge` (one bulk merge, not per-commit) | entire group → checkpoint | group-level |
+| `reference_isa_change` | per-commit ISA translation via agent loop | per-commit → checkpoint (inside group) | group-level |
+| `target_isa_direct` | path-limited `git apply` per commit | per-commit → checkpoint | group-level |
+| `cross_cutting` | merge first, then ISA repair per commit | per-commit → checkpoint | group-level |
+| other | skip, record | — | — |
+
+Non-shared_code groups execute each commit individually (each has its own
+checkpoint and rollback), but validation runs once at group level. This ensures
+that a validation failure can be traced to exactly the group type that
+introduced it --- merge group failure = shared code issue, ISA translation
+group failure = porting issue.
+
+Group boundaries are computed during the planning phase, before execution:
+
+```python
+def group_commits(plan: PromotionPlan) -> list[CommitGroup]:
+    groups: list[CommitGroup] = []
+    for planned in plan.commits:
+        kind = _group_kind(planned)
+        if groups and groups[-1].kind == kind:
+            groups[-1].commits.append(planned)
+        else:
+            groups.append(CommitGroup(kind=kind, commits=[planned]))
+    return groups
+```
+
 For `reference_isa_change`, the orchestrator must run `change_analyzer` before
 semantic porting. The analyzer output must be structured, not a binary
 `has_semantic_change: bool`.
@@ -193,15 +242,10 @@ Initial result shape:
 ChangeAnalysis
   kind: comment_only | format_only | metadata_only | refactor |
         api_shape_change | logic_change | new_symbol | mixed | unknown
-  confidence: 0.0-1.0
   signals: list[ChangeSignal]
   changed_symbols: list[str]
   mapped_target_candidates: list[path]
-  suggested_gate: no_target_change | needs_semantic_port |
-                  needs_manual_review | needs_validation_only
 ```
-
-`suggested_gate` is advisory. The orchestrator owns the final gate decision.
 
 `change_analyzer` exposes one facade:
 
@@ -220,8 +264,7 @@ only zero-dependency text analyzers. Optional AST analyzers may be added later a
 explicit registrations in the same chain.
 
 Sub-analyzers only produce `ChangeSignal` values. The aggregator owns
-`kind`, `confidence`, and `suggested_gate`. The orchestrator owns the final gate
-decision.
+`kind` and the final gate decision.
 
 The analyzer should produce deterministic signals such as:
 
@@ -259,7 +302,6 @@ The orchestrator's LLM gate owns the final decision:
 ```text
 no_target_change
 needs_semantic_port
-needs_manual_review
 needs_validation_only
 ```
 
@@ -281,25 +323,22 @@ Initial gate policy:
   `no_target_change`.
 - obvious runtime-semantic reference diffs with mapped target candidates become
   `needs_semantic_port`.
-- refactors or API shape changes with low confidence should usually become
-  `needs_validation_only` or `needs_manual_review`, not automatic LLM semantic
-  porting.
+- refactors or API shape changes should usually become
+  `needs_validation_only`, not automatic LLM semantic porting.
 - semantic reference diffs without a mapped target candidate become
-  `needs_manual_review`.
+  `needs_semantic_port`.
 - target-direct or shared-code changes go through Git/validation before any LLM
   repair decision.
 
-When the analyzer is uncertain, prefer `needs_semantic_port` or
-`needs_manual_review` over silently skipping a reference ISA commit. Record the
-signals that caused the decision.
+When the analyzer is uncertain, prefer `needs_semantic_port` over silently
+skipping a reference ISA commit. Record the signals that caused the decision.
 
 Dispatch outcomes:
 
 ```text
 no_target_change    -> skip, record
-needs_validation    -> validator, record
+needs_validation_only -> already handled by merge or path-limited apply
 needs_semantic_port -> semantic_porter, validator, record
-needs_manual_review -> manual record
 ```
 
 Use Git directly from the orchestrator for mechanical work. Do not ask an LLM to
@@ -340,7 +379,6 @@ Use an LLM only when the workflow has a semantic gap:
 - map reference ISA behavior to target ISA code
 - resolve semantic conflicts
 - repair focused build/test failures
-- write a manual item explaining why a commit cannot be safely ported
 
 LLM output should be patch-oriented or decision-oriented.
 
@@ -360,7 +398,6 @@ Record facts after workflow steps:
 - target ISA context
 - validation result
 - whether an LLM was used
-- manual next step, if any
 
 Reports should summarize promotion facts useful to a maintainer. Do not expose
 internal agent turn bookkeeping.

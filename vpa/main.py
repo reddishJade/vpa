@@ -63,18 +63,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run the mechanical Git path for eligible commits",
     )
     promote_p.add_argument(
-        "--semantic-confidence-threshold",
-        type=float,
-        default=None,
-        help="Override minimum analyzer confidence before semantic porting",
-    )
-    promote_p.add_argument(
-        "--manual-confidence-threshold",
-        type=float,
-        default=None,
-        help="Override confidence below which manual review is preferred",
-    )
-    promote_p.add_argument(
         "--risk-preference",
         choices=[item.value for item in RiskPreference],
         default=None,
@@ -91,6 +79,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Override maximum semantic-port prompt size before truncation",
+    )
+    promote_p.add_argument(
+        "--merge-source",
+        default=None,
+        help="Git ref to merge for shared code (default: upstream/main)",
     )
     return parser
 
@@ -117,16 +110,6 @@ def main(argv=None):
 
         risk_preference = args.risk_preference or settings.risk_preference
         policy = GatePolicy(
-            semantic_confidence_threshold=(
-                args.semantic_confidence_threshold
-                if args.semantic_confidence_threshold is not None
-                else settings.semantic_confidence_threshold
-            ),
-            manual_confidence_threshold=(
-                args.manual_confidence_threshold
-                if args.manual_confidence_threshold is not None
-                else settings.manual_confidence_threshold
-            ),
             risk_preference=RiskPreference(risk_preference),
             dry_run=args.dry_run,
         )
@@ -134,6 +117,11 @@ def main(argv=None):
             upstream_repo=upstream_repo,
             local_repo=local_repo,
             revision_range=revision_range,
+            merge_source=(
+                args.merge_source
+                if args.merge_source is not None
+                else settings.merge_source
+            ),
             target_isa_path=(
                 Path(args.target_isa_path) if args.target_isa_path else settings.target_isa_path
             ),
