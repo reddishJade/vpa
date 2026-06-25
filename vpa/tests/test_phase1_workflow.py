@@ -146,17 +146,27 @@ def test_gate_routes_shared_change_to_validation_only():
     assert gate.kind == GateDecisionKind.NEEDS_VALIDATION_ONLY
 
 
-def test_promote_cli_builds_config_and_renders_plan(capsys):
+def test_promote_cli_builds_config_and_renders_plan(capsys, tmp_path):
+    config_path = tmp_path / "vpa.toml"
+    config_path.write_text(
+        """
+[promotion]
+upstream_repo = "configured-upstream"
+local_repo = "configured-local"
+
+[validation]
+smoke_commands = ["make configured-test"]
+""",
+        encoding="utf-8",
+    )
     with patch("vpa.main.PromotionOrchestrator") as orchestrator_cls:
         orchestrator = orchestrator_cls.return_value
         orchestrator.plan.return_value.commits = []
         main(
             [
                 "promote",
-                "--upstream-repo",
-                "upstream",
-                "--local-repo",
-                "local",
+                "--config",
+                str(config_path),
                 "--rev-range",
                 "old..new",
                 "--dry-run",
@@ -166,8 +176,8 @@ def test_promote_cli_builds_config_and_renders_plan(capsys):
         )
 
     config = orchestrator_cls.call_args.args[0]
-    assert config.upstream_repo == Path("upstream")
-    assert config.local_repo == Path("local")
+    assert config.upstream_repo == Path("configured-upstream")
+    assert config.local_repo == Path("configured-local")
     assert config.revision_range == "old..new"
     assert config.dry_run is True
     assert config.smoke_commands == ["make test"]
@@ -194,4 +204,45 @@ def test_promote_cli_execute_runs_mechanical_workflow(capsys):
 
     orchestrator.execute.assert_called_once_with()
     orchestrator.plan.assert_not_called()
+    assert "VPA promotion execution" in capsys.readouterr().out
+
+
+def test_promote_cli_builds_openai_compatible_repair_engine(capsys, tmp_path):
+    config_path = tmp_path / "vpa.toml"
+    config_path.write_text(
+        """
+[promotion]
+upstream_repo = "upstream"
+local_repo = "local"
+
+[llm]
+model = "port-model"
+base_url = "https://llm.example/v1"
+api_key_env = "VPA_TEST_API_KEY"
+""",
+        encoding="utf-8",
+    )
+    with (
+        patch("vpa.main.PromotionOrchestrator") as orchestrator_cls,
+        patch.dict("os.environ", {"VPA_TEST_API_KEY": "secret"}),
+    ):
+        orchestrator = orchestrator_cls.return_value
+        orchestrator.execute.return_value.plan.commits = []
+        orchestrator.execute.return_value.executed = []
+        main(
+            [
+                "promote",
+                "--config",
+                str(config_path),
+                "--rev-range",
+                "old..new",
+                "--execute",
+            ]
+        )
+
+    repair_engine = orchestrator_cls.call_args.kwargs["repair_engine"]
+    client = repair_engine.llm_client
+    assert client.config.model == "port-model"
+    assert client.config.base_url == "https://llm.example/v1"
+    assert client.config.api_key == "secret"
     assert "VPA promotion execution" in capsys.readouterr().out

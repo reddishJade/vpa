@@ -1,0 +1,31 @@
+[promotion]
+upstream_repo = "box64-2-sw64"
+local_repo = "box64-2-sw64"
+
+[isa]
+reference_isa_path = "src/dynarec/rv64"
+target_isa_path = "src/dynarec/sw64_core3"
+fallback_reference_isa_paths = [
+  "src/dynarec/la64",
+  "src/dynarec/arm64",
+]
+
+[validation]
+build_command = "cmake -S . -B build -DSW64=ON -DSW64Core3=ON -DCMAKE_BUILD_TYPE=Release && cmake --build build -j 8"
+smoke_commands = []
+
+[output]
+ledger_path = "promotion_output/vpa-ledger.jsonl"
+report_path = "promotion_output/vpa-report.json"
+
+[gate]
+semantic_confidence_threshold = 0.65
+manual_confidence_threshold = 0.4
+risk_preference = "balanced"
+
+[llm]
+model = "your-model"
+base_url = "https://your-provider/v1"
+api_key_env = "VPA_API_KEY"
+temperature = 0.0
+max_context_chars = 60000

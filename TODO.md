@@ -21,6 +21,7 @@ not mean VPA is finished.
 
 ## Open Design Cleanup
 
+wsl
 - [x] Standardize gate decision naming across docs and code before Phase 1
       implementation. Preferred enum: `needs_validation_only`.
 - [x] Decide how to handle the existing top-level legacy modules that conflict
@@ -28,6 +29,8 @@ not mean VPA is finished.
       `vpa/ledger/`.
 - [x] Decide whether legacy modules should move under a `legacy/` namespace or
       remain untouched until replaced.
+- [x] Move persistent project defaults into a TOML config file instead of
+      requiring long repeated CLI commands.
 
 ## Phase 1: Skeleton And CLI
 
@@ -202,15 +205,15 @@ semantic porting.
 
 Goal: handle `rv64` changes that imply `sw64_core3` work.
 
-- [ ] Detect reference-ISA-only commits.
-- [ ] Map touched reference files to target candidates.
-- [ ] Build compact semantic-port context from reference diff and target file.
-- [ ] Inject LLM client into `engines/repair.py`.
-- [ ] Ask LLM for patch-oriented semantic port output only after gate approval.
-- [ ] Apply proposed target-side patch through a controlled patch path.
-- [ ] Validate patched target state.
-- [ ] Record manual items when mapping is unsafe.
-- [ ] Add tests for semantic-port context construction without requiring the
+- [x] Detect reference-ISA-only commits.
+- [x] Map touched reference files to target candidates.
+- [x] Build compact semantic-port context from reference diff and target file.
+- [x] Inject LLM client into `engines/repair.py`.
+- [x] Ask LLM for patch-oriented semantic port output only after gate approval.
+- [x] Apply proposed target-side patch through a controlled patch path.
+- [x] Validate patched target state.
+- [x] Record manual items when mapping is unsafe.
+- [x] Add tests for semantic-port context construction without requiring the
       large `box64-2-sw64` fixture.
 
 ## Phase 4: Range Recovery And Operational MVP
@@ -231,6 +234,11 @@ scratch after the first failure.
 - [ ] Add optional AST analyzer as an explicit registered analyzer.
 - [ ] Add symbol-name mapping from reference symbols to target candidates.
 - [ ] Add confidence improvements from normalized AST equivalence.
+- [ ] Replace fixed heuristic confidence constants with a calibrated scoring
+      model based on signal count, file scope, hunk scope, analyzer agreement,
+      and explicit uncertainty reasons.
+- [ ] Expose signal provenance in plan output so scores are explainable instead
+      of opaque constants like `0.82`.
 - [ ] Add richer file-to-test policy tables.
 - [ ] Add targeted test inference after configured validation is stable.
 - [ ] Add fallback reference triangulation using `la64` and `arm64`.

@@ -35,6 +35,10 @@ _HUNK_RE = re.compile(
 class GitEngine:
     def __init__(self, repo: str | Path):
         self.repo = Path(repo)
+        if not self.repo.is_dir():
+            raise ValueError(f"Git repo path is not a directory: {self.repo}")
+        if not (self.repo / ".git").exists():
+            raise ValueError(f"Path is not a Git repository: {self.repo}")
 
     def list_commits(self, revision_range: str) -> list[str]:
         result = self._run(["rev-list", "--reverse", revision_range])
@@ -95,25 +99,45 @@ class GitEngine:
             conflicts=conflicts,
         )
 
-    def apply_patch_3way(self, patch_text: str) -> GitApplyResult:
+    def apply_patch_3way(
+        self,
+        patch_text: str,
+        *,
+        method: PromotionMethod = PromotionMethod.PATH_LIMITED_APPLY_3WAY,
+        commit_message: str = "VPA path-limited apply",
+    ) -> GitApplyResult:
         result = self._run_result(["apply", "--3way", "--index", "-"], input_text=patch_text)
         if result.returncode != 0:
             conflicts = self.conflicted_files()
             if not conflicts:
                 direct = self._run_result(["apply", "--index", "-"], input_text=patch_text)
                 if direct.returncode == 0:
-                    return self._commit_applied_patch(direct)
+                    return self._commit_applied_patch(
+                        direct,
+                        method=method,
+                        commit_message=commit_message,
+                    )
                 result = direct
             return GitApplyResult(
                 status=GitOperationStatus.CONFLICT if conflicts else GitOperationStatus.FAILED,
-                method=PromotionMethod.PATH_LIMITED_APPLY_3WAY,
+                method=method,
                 command=result,
                 conflicts=conflicts,
             )
 
-        return self._commit_applied_patch(result)
+        return self._commit_applied_patch(
+            result,
+            method=method,
+            commit_message=commit_message,
+        )
 
-    def _commit_applied_patch(self, apply_result: GitCommandResult) -> GitApplyResult:
+    def _commit_applied_patch(
+        self,
+        apply_result: GitCommandResult,
+        *,
+        method: PromotionMethod,
+        commit_message: str,
+    ) -> GitApplyResult:
         commit = self._run_result(
             [
                 "-c",
@@ -122,19 +146,19 @@ class GitEngine:
                 "user.email=vpa@example.invalid",
                 "commit",
                 "-m",
-                "VPA path-limited apply",
+                commit_message,
             ]
         )
         if commit.returncode == 0:
             return GitApplyResult(
                 status=GitOperationStatus.APPLIED,
-                method=PromotionMethod.PATH_LIMITED_APPLY_3WAY,
+                method=method,
                 command=commit,
                 commit_sha=self.current_head(),
             )
         return GitApplyResult(
             status=GitOperationStatus.FAILED,
-            method=PromotionMethod.PATH_LIMITED_APPLY_3WAY,
+            method=method,
             command=commit if commit.returncode != 0 else apply_result,
             conflicts=self.conflicted_files(),
         )

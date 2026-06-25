@@ -9,6 +9,7 @@ from vpa.analysis.change_analyzer import analyze
 from vpa.analysis.classifier import classify_commit
 from vpa.analysis.isa_mapper import map_reference_files
 from vpa.engines.git import GitEngine, render_patch
+from vpa.engines.repair import RepairEngine
 from vpa.engines.validation import run_validation
 from vpa.ledger.store import LedgerStore
 from vpa.orchestrator.llm_gate import decide
@@ -73,10 +74,11 @@ class PromotionRun:
 
 
 class PromotionOrchestrator:
-    def __init__(self, config: PromotionConfig):
+    def __init__(self, config: PromotionConfig, repair_engine: RepairEngine | None = None):
         self.config = config
         self.upstream_git = GitEngine(config.upstream_repo)
         self.local_git = GitEngine(config.local_repo)
+        self.repair_engine = repair_engine or RepairEngine()
 
     def plan(self) -> PromotionPlan:
         planned: list[PlannedCommit] = []
@@ -143,16 +145,7 @@ class PromotionOrchestrator:
                 manual_item="Manual review required by gate decision.",
             )
         if gate == GateDecisionKind.NEEDS_SEMANTIC_PORT:
-            return ExecutedCommit(
-                planned=planned,
-                method=PromotionMethod.SEMANTIC_PORT_PENDING,
-                git_result=GitApplyResult(
-                    status=GitOperationStatus.SKIPPED,
-                    method=PromotionMethod.SEMANTIC_PORT_PENDING,
-                ),
-                validation=ValidationResult(ValidationStatus.NOT_RUN),
-                manual_item="Semantic porting is planned for Phase 3.",
-            )
+            return self._execute_semantic_port(planned)
 
         checkpoint = self.local_git.checkpoint()
         method = _mechanical_method(planned)
@@ -189,13 +182,71 @@ class PromotionOrchestrator:
             validation=validation,
         )
 
+    def _execute_semantic_port(self, planned: PlannedCommit) -> ExecutedCommit:
+        checkpoint = self.local_git.checkpoint()
+        repair = self.repair_engine.semantic_port(
+            planned.context,
+            planned.analysis,
+            planned.gate_decision,
+            self.config.local_repo,
+        )
+        if repair.patch_text is None:
+            return ExecutedCommit(
+                planned=planned,
+                method=PromotionMethod.SEMANTIC_PORT_PENDING,
+                git_result=GitApplyResult(
+                    status=GitOperationStatus.SKIPPED,
+                    method=PromotionMethod.SEMANTIC_PORT_PENDING,
+                    checkpoint=checkpoint,
+                ),
+                validation=ValidationResult(ValidationStatus.NOT_RUN),
+                manual_item=repair.manual_item,
+            )
+
+        git_result = self.local_git.apply_patch_3way(
+            repair.patch_text,
+            method=PromotionMethod.SEMANTIC_PORT,
+            commit_message=f"VPA semantic port {planned.context.commit.sha[:12]}",
+        )
+        git_result = _with_checkpoint(git_result, checkpoint)
+        if git_result.status != GitOperationStatus.APPLIED:
+            self._rollback(checkpoint, git_result)
+            return ExecutedCommit(
+                planned=planned,
+                method=PromotionMethod.SEMANTIC_PORT,
+                git_result=_rolled_back(git_result),
+                validation=ValidationResult(ValidationStatus.NOT_RUN),
+                manual_item="Semantic port patch failed to apply; rolled back to checkpoint.",
+            )
+
+        validation = run_validation(self.config.local_repo, _validation_commands(self.config))
+        if validation.status == ValidationStatus.FAILED:
+            self._rollback(checkpoint, git_result)
+            return ExecutedCommit(
+                planned=planned,
+                method=PromotionMethod.SEMANTIC_PORT,
+                git_result=_rolled_back(git_result),
+                validation=validation,
+                manual_item=(
+                    "Validation failed after semantic port patch; "
+                    "rolled back to checkpoint."
+                ),
+            )
+
+        return ExecutedCommit(
+            planned=planned,
+            method=PromotionMethod.SEMANTIC_PORT,
+            git_result=git_result,
+            validation=validation,
+        )
+
     def _apply_mechanical_commit(
         self,
         planned: PlannedCommit,
         method: PromotionMethod,
     ) -> GitApplyResult:
         if method == PromotionMethod.PATH_LIMITED_APPLY_3WAY:
-            files = _path_limited_files(planned)
+            files = _path_limited_files(planned, self.config.target_isa_path)
             return self.local_git.apply_patch_3way(render_patch(files))
         return self.local_git.cherry_pick_from(
             self.config.upstream_repo,
@@ -203,7 +254,10 @@ class PromotionOrchestrator:
         )
 
     def _rollback(self, checkpoint: str, git_result: GitApplyResult) -> None:
-        if git_result.status == GitOperationStatus.CONFLICT:
+        if (
+            git_result.status == GitOperationStatus.CONFLICT
+            and git_result.method == PromotionMethod.CHERRY_PICK
+        ):
             self.local_git.abort_cherry_pick()
         self.local_git.reset_to_checkpoint(checkpoint)
 
@@ -243,11 +297,11 @@ def _mechanical_method(planned: PlannedCommit) -> PromotionMethod:
     return PromotionMethod.CHERRY_PICK
 
 
-def _path_limited_files(planned: PlannedCommit):
+def _path_limited_files(planned: PlannedCommit, target_isa_path: Path):
     target_files = []
     for file_diff in planned.context.diff_context.files:
         path = file_diff.path
-        if path and _is_under(path, Path("src/dynarec/sw64_core3")):
+        if path and _is_under(path, target_isa_path):
             target_files.append(file_diff)
     return target_files or planned.context.diff_context.files
 
@@ -300,6 +354,6 @@ def _ledger_record(executed: ExecutedCommit) -> LedgerRecord:
         method=executed.method,
         git=executed.git_result,
         validation=executed.validation,
-        llm_used=False,
+        llm_used=executed.method == PromotionMethod.SEMANTIC_PORT,
         manual_item=executed.manual_item,
     )

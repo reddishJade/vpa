@@ -17,6 +17,29 @@ and applied semantically to a local backend.
 
 See [DESIGN.md](DESIGN.md) for the current architecture.
 
+## Configuration
+
+VPA reads `vpa.toml` from the current directory when it exists. Copy
+`vpa.example.toml` to `vpa.toml`, then edit repo paths, validation commands, and
+the OpenAI-compatible LLM endpoint once.
+
+Keep API keys in the environment and reference the variable name from config:
+
+```toml
+[llm]
+model = "your-model"
+base_url = "https://your-provider/v1"
+api_key_env = "VPA_API_KEY"
+```
+
+After that, day-to-day commands can stay short:
+
+```powershell
+uv run python -m vpa.main promote `
+  --rev-range upstream/main~3..upstream/main `
+  --dry-run
+```
+
 ## Current Status
 
 The previous implementation was a ledger-driven agent harness. The current

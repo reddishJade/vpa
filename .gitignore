@@ -21,6 +21,7 @@ venv/
 
 # Environment
 .env
+vpa.toml
 
 # Default output directory
 promotion_output/

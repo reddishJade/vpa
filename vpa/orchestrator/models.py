@@ -98,6 +98,7 @@ class PromotionMethod(StrEnum):
     CHERRY_PICK = "cherry_pick"
     PATH_LIMITED_APPLY_3WAY = "path_limited_apply_3way"
     MANUAL = "manual"
+    SEMANTIC_PORT = "semantic_port"
     SEMANTIC_PORT_PENDING = "semantic_port_pending"
 
 
@@ -255,6 +256,29 @@ class GitApplyResult:
     command: GitCommandResult | None = None
     conflicts: list[Path] = field(default_factory=list)
     commit_sha: str | None = None
+
+
+@dataclass(frozen=True)
+class TargetFileContext:
+    path: Path
+    content: str | None
+
+
+@dataclass(frozen=True)
+class SemanticPortContext:
+    commit: CommitInfo
+    reference_patches: dict[Path, str]
+    target_files: list[TargetFileContext]
+    analysis: ChangeAnalysis
+    gate_reasons: list[str]
+
+
+@dataclass(frozen=True)
+class SemanticPortResult:
+    patch_text: str | None
+    context: SemanticPortContext
+    llm_used: bool = False
+    manual_item: str | None = None
 
 
 @dataclass(frozen=True)
