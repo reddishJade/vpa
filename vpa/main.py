@@ -182,7 +182,7 @@ def _build_repair_engine(settings) -> RepairEngine:
             max_completion_tokens=settings.llm.max_completion_tokens,
         )
     )
-    return RepairEngine(client)
+    return RepairEngine(client, model_name=settings.llm.model)
 
 
 if __name__ == "__main__":

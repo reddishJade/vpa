@@ -636,9 +636,7 @@ def _merge_ledger_record(
     apply_status: str = "not_run",
     validation_status: str = "not_run",
 ) -> MergeLedgerRecord:
-    exhausted = (
-        list(repair_result.failed_files) if repair_result and repair_result.failed_files else []
-    )
+    exhausted = list(repair_result.failed_files) if repair_result else []
     resolved = len(repair_result.resolved_files) if repair_result else 0
     commit_sha = None
     if applied_merge and applied_merge.git_result:

@@ -11,6 +11,7 @@ import re
 import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Protocol, cast
 
@@ -84,8 +85,10 @@ class RepairEngine:
         llm_client: (
             SemanticPortClient | Callable[[SemanticPortContext], str | None] | None
         ) = None,
+        model_name: str = "gpt-4o",
     ):
         self.llm_client = llm_client
+        self.model_name = model_name
 
     def semantic_port(
         self,
@@ -222,8 +225,13 @@ class RepairEngine:
                 {"role": "system", "content": _system_prompt(op)},
                 {"role": "user", "content": _user_content(op, file_path, context)},
             ]
-        for _ in range(max_retries):
-            response = _llm_call(self._llm_chat, "gpt-4o", messages, tools)
+        debug_log = Path("logs/agent_loop_debug.jsonl")
+        retry_count = 0
+        iteration = 0
+        while retry_count < max_retries:
+            response = _llm_call(self._llm_chat, self.model_name, messages, tools)
+            _log_llm_debug(debug_log, op, iteration, messages, response)
+            iteration += 1
             if response is None:
                 return AgentLoopResult(
                     success=False,
@@ -232,6 +240,10 @@ class RepairEngine:
                 )
             msg = response["choices"][0]["message"]
             if msg.get("tool_calls"):
+                msg_copy = dict(msg)
+                if msg_copy.get("content") is None:
+                    msg_copy["content"] = ""
+                messages.append(msg_copy)
                 for call in msg["tool_calls"]:
                     args = json.loads(call["function"]["arguments"])
                     result = _execute_tool(call["function"]["name"], args, op)
@@ -240,24 +252,48 @@ class RepairEngine:
                         "tool_call_id": call["id"],
                         "content": json.dumps(result),
                     })
-            elif op == "translate":
-                content = msg.get("content") or ""
-                try:
-                    patched = _apply_changeset(content, workspace)
-                except Exception:
-                    patched = []
+                continue
+            integrity_error = _check_integrity(op, msg, workspace)
+            if integrity_error is None:
+                patched = _collect_patched(op, msg, workspace)
                 return AgentLoopResult(success=True, patched_files=patched)
-            else:
-                return AgentLoopResult(success=True, patched_files=[])
+            retry_count += 1
+            messages.append({
+                "role": "user",
+                "content": integrity_error,
+            })
         return AgentLoopResult(
             success=False,
             failure_code=FailureCode.MAX_RETRIES,
-            status_reason="Agent loop exceeded max retries",
+            status_reason=f"Agent loop exceeded max retries: {retry_count} integrity failures",
         )
 
     @property
     def _llm_chat(self) -> Callable:
         return cast(Callable, self.llm_client)
+
+
+def _log_llm_debug(
+    log_path: Path, op: str, attempt: int,
+    request_messages: list[dict[str, Any]], response: dict[str, Any] | None,
+) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    entry: dict[str, Any] = {
+        "timestamp": datetime.now().isoformat(),
+        "op": op,
+        "attempt": attempt,
+    }
+    if response is not None:
+        msg = response.get("choices", [{}])[0].get("message", {})
+        entry["response"] = {
+            "role": msg.get("role"),
+            "content": msg.get("content"),
+            "tool_calls": msg.get("tool_calls"),
+        }
+    else:
+        entry["response"] = None
+    with open(log_path, "a") as f:
+        f.write(json.dumps(entry) + "\n")
 
 
 def _llm_call(
@@ -281,6 +317,7 @@ def _llm_call(
     for tc in (choice.message.tool_calls or []):
         tcs.append({
             "id": tc.id,
+            "type": "function",
             "function": {"name": tc.function.name, "arguments": tc.function.arguments},  # type: ignore[attr-defined]
         })
     return {
@@ -397,7 +434,7 @@ def _tool_apply_patch() -> dict[str, Any]:
     }
 
 
-_READONLY_BASH_COMMANDS = {"git show", "grep", "cat", "test", "diff"}
+_READONLY_BASH_COMMANDS = {"git show", "git log", "git diff"}
 
 
 def _apply_changeset(text: str, repo_root: Path = Path(".")) -> list[Path]:
@@ -430,6 +467,59 @@ def _apply_changeset(text: str, repo_root: Path = Path(".")) -> list[Path]:
     return patched
 
 
+_CONFLICT_MARKER_RE = re.compile(r"<<<<<<< |=======|>>>>>>>")
+
+
+def _validate_changeset(text: str, repo_root: Path) -> str | None:
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as e:
+        return f"ChangeSet is not valid JSON: {e}"
+    changes = data.get("changes", [])
+    if not changes:
+        return "ChangeSet has no changes."
+    for change in changes:
+        path = (repo_root / change["path"]).resolve()
+        if not path.exists():
+            return f"Target file not found: {path}"
+        edits = change.get("edits", [])
+        if not edits:
+            continue
+        original = path.read_text(encoding="utf-8")
+        for edit in edits:
+            old = edit.get("old", "")
+            if original.find(old) == -1:
+                return f"Anchor not found in {path}"
+            if original.find(old, original.find(old) + len(old)) != -1:
+                return f"Multiple anchor matches in {path}"
+    return None
+
+
+def _check_integrity(
+    op: str, msg: dict[str, Any], workspace: Path,
+) -> str | None:
+    if op == "translate":
+        content = msg.get("content") or ""
+        if not content.strip():
+            return "LLM returned empty response. Provide a ChangeSet with the translation."
+        return _validate_changeset(content, workspace)
+    if op == "resolve":
+        content = msg.get("content") or ""
+        if content.strip() and _CONFLICT_MARKER_RE.search(content):
+            return "Resolved content still contains conflict markers."
+        return None
+    return None
+
+
+def _collect_patched(
+    op: str, msg: dict[str, Any], workspace: Path,
+) -> list[Path]:
+    if op == "translate":
+        content = msg.get("content") or ""
+        return _apply_changeset(content, workspace)
+    return []
+
+
 def _execute_tool(name: str, args: dict[str, Any], op: str) -> dict[str, Any]:
     if name == "read":
         return _tool_handler_read(args)
@@ -454,6 +544,8 @@ def _tool_handler_read(args: dict[str, Any]) -> dict[str, Any]:
     path = Path(args["path"])
     if not path.exists():
         return {"error": f"File not found: {path}"}
+    if path.is_dir():
+        return {"error": f"Path is a directory, not a file: {path}"}
     content = path.read_text(encoding="utf-8")
     line_range = args.get("line_range")
     if line_range:
@@ -467,6 +559,8 @@ def _tool_handler_grep(args: dict[str, Any]) -> dict[str, Any]:
     path = Path(args["path"])
     if not path.exists():
         return {"error": f"File not found: {path}"}
+    if path.is_dir():
+        return {"error": f"Path is a directory, not a file: {path}"}
     matches: list[dict[str, Any]] = []
     for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if re.search(args["pattern"], line):
@@ -532,9 +626,18 @@ def _system_prompt(op: str) -> str:
     if op == "translate":
         return (
             "You are VPA's ISA translation engine. Port the reference ISA change "
-            "to the target ISA file(s). Use read to inspect target files, grep to "
-            "search, and apply_patch to make edits. When finished, you may instead "
-            "respond with a JSON ChangeSet describing all changes to apply."
+            "to the target ISA file(s).\n\n"
+            "Rules:\n"
+            "1. FIRST use the read tool to inspect target files. Do NOT guess their content.\n"
+            "2. Use grep to search for relevant symbols or patterns.\n"
+            "3. Use git show/log/diff (via bash tool) to inspect commit history if needed.\n"
+            "4. When you have enough context, respond with a JSON ChangeSet.\n"
+            "5. Each edit's \"old\" string MUST be copied exactly from the file you read.\n"
+            "6. Do NOT include surrounding context that isn't in the file.\n"
+            "7. Do NOT use bash to search the filesystem. Use read/grep instead.\n\n"
+            "ChangeSet format:\n"
+            '{"changes": [{"op": "modify", "path": "src/dynarec/sw64_core3/foo.c", '
+            '"edits": [{"old": "exact text from file", "new": "replacement text"}]}]}'
         )
     return "You are VPA's agent."
 
