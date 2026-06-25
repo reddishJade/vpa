@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 from vpa.orchestrator.models import GitOperationStatus, PromotionMethod, ValidationStatus
-from vpa.orchestrator.promotion import PromotionConfig, PromotionOrchestrator
+from vpa.orchestrator.promotion import PromotionConfig, PromotionOrchestrator, render_run
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -95,6 +95,9 @@ def test_execute_rolls_back_on_cherry_pick_conflict(tmp_path):
     assert run.executed[0].git_result
     assert run.executed[0].git_result.status == GitOperationStatus.ROLLED_BACK
     assert run.executed[0].manual_item
+    rendered = render_run(run)
+    assert "git_returncode:" in rendered
+    assert "git_stderr:" in rendered
 
 
 def test_execute_rolls_back_on_validation_failure(tmp_path):
@@ -116,6 +119,28 @@ def test_execute_rolls_back_on_validation_failure(tmp_path):
     assert run.executed[0].git_result
     assert run.executed[0].git_result.status == GitOperationStatus.ROLLED_BACK
     assert run.executed[0].validation.status == ValidationStatus.FAILED
+
+
+def test_execute_refuses_dirty_tracked_local_repo(tmp_path):
+    upstream, local, base = _make_repos(tmp_path)
+    head = _commit_file(upstream, "src/core.c", "int value = 2;\n", "shared update")
+    (local / "src/core.c").write_text("int value = 99;\n", encoding="utf-8")
+
+    try:
+        PromotionOrchestrator(
+            PromotionConfig(
+                upstream_repo=upstream,
+                local_repo=local,
+                revision_range=f"{base}..{head}",
+            )
+        ).execute()
+    except ValueError as error:
+        assert "tracked uncommitted changes" in str(error)
+        assert "src/core.c" in str(error)
+    else:
+        raise AssertionError("execute should refuse a dirty tracked local repo")
+
+    assert (local / "src/core.c").read_text(encoding="utf-8") == "int value = 99;\n"
 
 
 def test_execute_uses_path_limited_apply_for_target_direct_commit(tmp_path):

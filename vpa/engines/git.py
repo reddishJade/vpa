@@ -69,6 +69,20 @@ class GitEngine:
     def current_head(self) -> str:
         return self.checkpoint()
 
+    def tracked_changes(self) -> list[Path]:
+        result = self._run_result(["status", "--porcelain", "--untracked-files=no"])
+        if result.returncode != 0:
+            return []
+        paths: list[Path] = []
+        for line in result.stdout.splitlines():
+            if not line:
+                continue
+            path_text = line[3:]
+            if " -> " in path_text:
+                path_text = path_text.split(" -> ", 1)[1]
+            paths.append(Path(path_text.strip('"')))
+        return paths
+
     def create_work_branch(self, branch_name: str) -> GitCommandResult:
         return self._run_result(["checkout", "-B", branch_name])
 

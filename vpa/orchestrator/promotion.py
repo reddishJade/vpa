@@ -111,6 +111,14 @@ class PromotionOrchestrator:
         return PromotionPlan(commits=planned)
 
     def execute(self) -> PromotionRun:
+        dirty_paths = self.local_git.tracked_changes()
+        if dirty_paths:
+            preview = ", ".join(path.as_posix() for path in dirty_paths[:8])
+            suffix = "" if len(dirty_paths) <= 8 else f", ... ({len(dirty_paths)} total)"
+            raise ValueError(
+                "Local repo has tracked uncommitted changes; refusing to execute "
+                f"because rollback uses git reset --hard: {preview}{suffix}"
+            )
         plan = self.plan()
         ledger = LedgerStore(self.config.ledger_path) if self.config.ledger_path else None
         executed: list[ExecutedCommit] = []
@@ -283,7 +291,37 @@ def render_run(run: PromotionRun) -> str:
         lines.append(f"- {commit.sha[:12]} {commit.subject}")
         lines.append(f"  method: {item.method}")
         lines.append(f"  git: {git_status}")
+        if item.git_result:
+            if item.git_result.conflicts:
+                conflicts = ", ".join(path.as_posix() for path in item.git_result.conflicts[:5])
+                suffix = (
+                    ""
+                    if len(item.git_result.conflicts) <= 5
+                    else f", ... ({len(item.git_result.conflicts)} total)"
+                )
+                lines.append(f"  conflicts: {conflicts}{suffix}")
+            if item.git_result.command and item.git_result.command.returncode != 0:
+                lines.append(f"  git_returncode: {item.git_result.command.returncode}")
+                stderr = _first_nonempty_lines(item.git_result.command.stderr)
+                if stderr:
+                    lines.append("  git_stderr:")
+                    lines.extend(f"    {line}" for line in stderr)
         lines.append(f"  validation: {item.validation.status}")
+        if item.validation.status == ValidationStatus.FAILED:
+            failed = next(
+                (
+                    command
+                    for command in item.validation.commands
+                    if command.status == ValidationStatus.FAILED
+                ),
+                None,
+            )
+            if failed:
+                lines.append(f"  failed_command: {failed.command}")
+                stderr = _first_nonempty_lines(failed.stderr)
+                if stderr:
+                    lines.append("  validation_stderr:")
+                    lines.extend(f"    {line}" for line in stderr)
         if item.manual_item:
             lines.append(f"  manual: {item.manual_item}")
     if not run.executed:
@@ -308,6 +346,11 @@ def _path_limited_files(planned: PlannedCommit, target_isa_path: Path):
 
 def _is_under(path: Path, parent: Path) -> bool:
     return path == parent or parent in path.parents
+
+
+def _first_nonempty_lines(text: str, limit: int = 6) -> list[str]:
+    lines = [line for line in text.splitlines() if line.strip()]
+    return lines[:limit]
 
 
 def _validation_commands(config: PromotionConfig) -> list[str]:

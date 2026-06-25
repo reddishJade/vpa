@@ -135,25 +135,19 @@ def main(argv=None):
             local_repo=local_repo,
             revision_range=revision_range,
             target_isa_path=(
-                Path(args.target_isa_path)
-                if args.target_isa_path
-                else settings.target_isa_path
+                Path(args.target_isa_path) if args.target_isa_path else settings.target_isa_path
             ),
             primary_reference_isa_path=(
                 Path(args.reference_isa_path)
                 if args.reference_isa_path
                 else settings.reference_isa_path
             ),
-            fallback_reference_isa_paths=[
-                Path(path) for path in args.fallback_reference_isa_path
-            ]
+            fallback_reference_isa_paths=[Path(path) for path in args.fallback_reference_isa_path]
             if args.fallback_reference_isa_path is not None
             else settings.fallback_reference_isa_paths,
             build_command=args.build_cmd if args.build_cmd is not None else settings.build_command,
             smoke_commands=(
-                args.smoke_test
-                if args.smoke_test is not None
-                else settings.smoke_commands
+                args.smoke_test if args.smoke_test is not None else settings.smoke_commands
             ),
             dry_run=args.dry_run,
             ledger_path=Path(args.ledger_path) if args.ledger_path else settings.ledger_path,
@@ -166,10 +160,16 @@ def main(argv=None):
         except ValueError as error:
             parser.error(str(error))
         if args.execute and not args.dry_run:
-            run = orchestrator.execute()
+            try:
+                run = orchestrator.execute()
+            except ValueError as error:
+                parser.error(str(error))
             print(render_run(run))
         else:
-            plan = orchestrator.plan()
+            try:
+                plan = orchestrator.plan()
+            except ValueError as error:
+                parser.error(str(error))
             print(render_plan(plan))
         return
 
