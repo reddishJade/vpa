@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from vpa.analysis.change_analyzer import analyze
-from vpa.analysis.classifier import classify_commit
+from vpa.analysis.classifier import classify_commit, classify_conflict_file
 from vpa.analysis.isa_mapper import map_reference_files
 from vpa.engines.git import GitEngine, render_patch
 from vpa.engines.repair import RepairEngine
@@ -18,6 +18,7 @@ from vpa.orchestrator.models import (
     ChangeAnalysis,
     CommitClass,
     CommitContext,
+    ConflictCategory,
     GateDecision,
     GateDecisionKind,
     GatePolicy,
@@ -26,6 +27,7 @@ from vpa.orchestrator.models import (
     GitOperationStatus,
     LedgerRecord,
     MergeConflictResolution,
+    MergeLedgerRecord,
     PromotionMethod,
     ValidationResult,
     ValidationStatus,
@@ -140,7 +142,7 @@ class PromotionOrchestrator:
         plan = self.plan()
         ledger = LedgerStore(self.config.ledger_path) if self.config.ledger_path else None
 
-        executed_merge = self._execute_merge(plan)
+        executed_merge = self._execute_merge(plan, ledger=ledger)
         executed: list[ExecutedCommit] = []
         for planned in plan.commits:
             if planned.gate_decision.kind != GateDecisionKind.NEEDS_SEMANTIC_PORT:
@@ -152,7 +154,9 @@ class PromotionOrchestrator:
 
         return PromotionRun(plan=plan, merge=executed_merge, executed=executed)
 
-    def _execute_merge(self, plan: PromotionPlan) -> ExecutedMerge | None:
+    def _execute_merge(
+        self, plan: PromotionPlan, ledger: LedgerStore | None = None
+    ) -> ExecutedMerge | None:
         checkpoint = self.local_git.checkpoint()
         merge_result = self.local_git.merge_from_ref(self.config.merge_source)
         repair_result: MergeConflictResolution | None = None
@@ -167,6 +171,15 @@ class PromotionOrchestrator:
             if repair_result.failed_files:
                 self.local_git.merge_abort()
                 self.local_git.reset_to_checkpoint(checkpoint)
+                if ledger:
+                    ledger.append(_merge_ledger_record(
+                        merge_source=self.config.merge_source,
+                        repair_result=repair_result,
+                        merge_result=merge_result,
+                        conflict_files=merge_result.conflicts,
+                        apply_status="rolled_back",
+                        validation_status="not_run",
+                    ))
                 return ExecutedMerge(
                     git_result=merge_result,
                     repair_result=repair_result,
@@ -190,6 +203,15 @@ class PromotionOrchestrator:
                 if no_edit.returncode != 0:
                     self.local_git.merge_abort()
                     self.local_git.reset_to_checkpoint(checkpoint)
+                    if ledger:
+                        ledger.append(_merge_ledger_record(
+                            merge_source=self.config.merge_source,
+                            repair_result=repair_result,
+                            merge_result=merge_result,
+                            conflict_files=merge_result.conflicts,
+                            apply_status="rolled_back",
+                            validation_status="not_run",
+                        ))
                     return ExecutedMerge(
                         git_result=merge_result,
                         repair_result=repair_result,
@@ -198,6 +220,15 @@ class PromotionOrchestrator:
         validation = run_validation(self.config.local_repo, _validation_commands(self.config))
         if validation.status == ValidationStatus.FAILED:
             self.local_git.reset_to_checkpoint(checkpoint)
+            if ledger:
+                ledger.append(_merge_ledger_record(
+                    merge_source=self.config.merge_source,
+                    repair_result=repair_result,
+                    merge_result=merge_result,
+                    conflict_files=merge_result.conflicts if merge_result.conflicts else [],
+                    apply_status="rolled_back",
+                    validation_status="failed",
+                ))
             return ExecutedMerge(
                 git_result=merge_result,
                 repair_result=repair_result,
@@ -205,26 +236,69 @@ class PromotionOrchestrator:
             )
 
         merge_sha = self.local_git.current_head()
-        return ExecutedMerge(
+        applied = ExecutedMerge(
             git_result=GitMergeResult(
                 status=GitOperationStatus.APPLIED,
-                conflicts=merge_result.conflicts,
+                conflicts=merge_result.conflicts if merge_result.conflicts else [],
                 commit_sha=merge_sha,
                 command=merge_result.command,
             ),
             repair_result=repair_result,
             validation=validation,
         )
+        if ledger:
+            ledger.append(_merge_ledger_record(
+                merge_source=self.config.merge_source,
+                repair_result=repair_result,
+                applied_merge=applied,
+                conflict_files=merge_result.conflicts if merge_result.conflicts else [],
+                apply_status="committed",
+                validation_status=validation.status.value,
+            ))
+        return applied
 
     def _resolve_merge_conflicts(self, conflict_files: list[Path]) -> MergeConflictResolution:
-        full_paths = [self.config.local_repo / f for f in conflict_files]
-        result = self.repair_engine.resolve_merge_conflicts(full_paths)
+        ref_paths = [self.config.primary_reference_isa_path]
+        ref_paths += self.config.fallback_reference_isa_paths
+        resolved: list[Path] = []
+        failed: list[Path] = []
+        for rel_path in conflict_files:
+            full_path = self.config.local_repo / rel_path
+            category = classify_conflict_file(rel_path, reference_isa_paths=ref_paths)
+            if category == ConflictCategory.ISA_BACKEND:
+                ok = self._resolve_isa_conflict(rel_path)
+            elif category == ConflictCategory.NON_SOURCE:
+                ok = self._resolve_non_source_conflict(rel_path)
+            else:
+                ok = self._resolve_source_conflict(rel_path)
+            if ok:
+                resolved.append(full_path)
+            else:
+                failed.append(full_path)
+        return MergeConflictResolution(resolved_files=resolved, failed_files=failed)
 
-        for file_path in result.resolved_files:
-            rel = file_path.relative_to(self.config.local_repo)
-            self.local_git._run_result(["add", str(rel)])
+    def _resolve_isa_conflict(self, rel_path: Path) -> bool:
+        self.local_git._run_result(["checkout", "--theirs", str(rel_path)])
+        self.local_git._run_result(["add", str(rel_path)])
+        return True
 
-        return result
+    def _resolve_non_source_conflict(self, rel_path: Path) -> bool:
+        full_path = self.config.local_repo / rel_path
+        result = self.repair_engine.agent_loop("resolve", file_path=full_path)
+        if result.success:
+            self.local_git._run_result(["add", str(rel_path)])
+            return True
+        self.local_git._run_result(["checkout", "--theirs", str(rel_path)])
+        self.local_git._run_result(["add", str(rel_path)])
+        return True
+
+    def _resolve_source_conflict(self, rel_path: Path) -> bool:
+        full_path = self.config.local_repo / rel_path
+        result = self.repair_engine.agent_loop("resolve", file_path=full_path)
+        if result.success:
+            self.local_git._run_result(["add", str(rel_path)])
+            return True
+        return False
 
     def _execute_commit(self, planned: PlannedCommit) -> ExecutedCommit:
         gate = planned.gate_decision.kind
@@ -492,6 +566,38 @@ def _rolled_back(result: GitApplyResult) -> GitApplyResult:
         command=result.command,
         conflicts=result.conflicts,
         commit_sha=result.commit_sha,
+    )
+
+
+def _merge_ledger_record(
+    *,
+    merge_source: str,
+    repair_result: MergeConflictResolution | None,
+    merge_result: GitMergeResult | None = None,
+    applied_merge: ExecutedMerge | None = None,
+    conflict_files: list[Path] | None = None,
+    apply_status: str = "not_run",
+    validation_status: str = "not_run",
+) -> MergeLedgerRecord:
+    exhausted = (
+        list(repair_result.failed_files) if repair_result and repair_result.failed_files else []
+    )
+    resolved = len(repair_result.resolved_files) if repair_result else 0
+    commit_sha = None
+    if applied_merge and applied_merge.git_result:
+        commit_sha = applied_merge.git_result.commit_sha
+    elif merge_result and merge_result.commit_sha:
+        commit_sha = merge_result.commit_sha
+
+    return MergeLedgerRecord(
+        merge_source=merge_source,
+        commit_sha=commit_sha,
+        strategy="stratified",
+        resolved_files=resolved,
+        exhausted_files=exhausted,
+        apply_status=apply_status,
+        integrity_status="passed",
+        validation_status=validation_status,
     )
 
 

@@ -8,7 +8,7 @@ Phases are sequential. Each phase depends on the previous.
 All design decisions and motivation are in `DESIGN.md`. Detailed per-step code
 changes are in `PHASES.md`. This file tracks what is done and what remains.
 
-## Phase 1: Core Infrastructure Cleanup + Agent Loop
+## Phase 1: Core Infrastructure Cleanup + Agent Loop — ✅ Complete
 
 **Goal**: remove the broken `_fallback_to_ours`, `manual_item`, `confidence`/`threshold`
 machinery; replace with the agent loop (function calling) and five tools; update
@@ -82,33 +82,33 @@ Completed across all files:
 
 ---
 
-## Phase 2: Merge Conflict Stratified Resolution
+## Phase 2: Merge Conflict Stratified Resolution — ✅ Complete
 
 **Goal**: replace the current `_execute_merge` which used `_fallback_to_ours`
 globally with the per-file stratified strategy.
 
 ### P2.1: File category classifier
 
-- [ ] Add `ConflictCategory` enum: `ISA_BACKEND`, `NON_SOURCE`, `SOURCE`
-- [ ] Add `classify_conflict_file(path)` in `analysis/classifier.py`
+- [x] Add `ConflictCategory` enum: `ISA_BACKEND`, `NON_SOURCE`, `SOURCE`
+- [x] Add `classify_conflict_file(path)` in `analysis/classifier.py`
 
-### P2.2: ISA backend → `checkout --theirs` + ledger
+### P2.2: ISA backend → `checkout --theirs` + `git add`
 
-- [ ] `_resolve_isa_conflict(path)` — `git checkout --theirs` + `git add`
+- [x] `_resolve_isa_conflict(path)` — `git checkout --theirs` + `git add`
 
 ### P2.3: Non-source files → agent loop + ledger
 
-- [ ] `_resolve_non_source_conflict(path)` — agent loop, fallback to theirs
+- [x] `_resolve_non_source_conflict(path)` — agent loop, fallback to theirs
 
 ### P2.4: Source files → agent loop + ledger
 
-- [ ] `_resolve_source_conflict(path)` — agent loop, exhausted on failure
+- [x] `_resolve_source_conflict(path)` — agent loop, exhausted on failure
 
 ### P2.5: Integrate into `_execute_merge`
 
-- [ ] Replace `_fallback_to_ours` loop with per-file stratified dispatch
-- [ ] Roll back entire merge if any source file is exhausted
-- [ ] Record `MergeLedgerRecord` on completion
+- [x] Replace old flat LLM loop with per-file stratified dispatch
+- [x] Roll back entire merge if any source file is exhausted
+- [x] Record `MergeLedgerRecord` on completion
 
 ---
 

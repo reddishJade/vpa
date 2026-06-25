@@ -7,11 +7,17 @@ from pathlib import Path
 from vpa.orchestrator.models import (
     ClassifiedCommit,
     CommitClass,
+    ConflictCategory,
     DiffContext,
 )
 
 DEFAULT_REFERENCE_ISA_PATH = Path("src/dynarec/rv64")
 DEFAULT_TARGET_ISA_PATH = Path("src/dynarec/sw64_core3")
+DEFAULT_REFERENCE_ISA_PATHS = [
+    DEFAULT_REFERENCE_ISA_PATH,
+    Path("src/dynarec/arm64"),
+    Path("src/dynarec/la64"),
+]
 GENERATED_MARKERS = ("generated", "vendor", "third_party", "external")
 
 
@@ -69,6 +75,23 @@ def classify_path(
     if normalized.startswith("src/") or normalized.startswith("tests/"):
         return CommitClass.SHARED_CODE
     return CommitClass.UNKNOWN
+
+
+def classify_conflict_file(
+    path: Path,
+    reference_isa_paths: list[Path] | None = None,
+) -> ConflictCategory:
+    ref_paths = reference_isa_paths or DEFAULT_REFERENCE_ISA_PATHS
+    for ref in ref_paths:
+        if _is_relative_to(path, ref):
+            return ConflictCategory.ISA_BACKEND
+    suffix = path.suffix.lower()
+    name = path.name.lower()
+    if (name in {"cmakelists.txt", "makefile"}
+        or suffix in {".cmake", ".mk", ".md", ".yml", ".yaml", ".txt",
+                      ".rst", ".json", ".toml", ".cfg", ".ini"}):
+        return ConflictCategory.NON_SOURCE
+    return ConflictCategory.SOURCE
 
 
 def _is_relative_to(path: Path, base: Path) -> bool:

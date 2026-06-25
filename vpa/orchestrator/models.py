@@ -83,6 +83,12 @@ class ValidationStatus(StrEnum):
     ERROR = "error"
 
 
+class ConflictCategory(StrEnum):
+    ISA_BACKEND = "isa_backend"
+    NON_SOURCE = "non_source"
+    SOURCE = "source"
+
+
 class FailureCode(StrEnum):
     MAX_RETRIES = "max_retries"
     INTEGRITY_FAIL = "integrity_fail"
@@ -302,6 +308,18 @@ class SemanticPortResult:
 class MergeConflictResolution:
     resolved_files: list[Path] = field(default_factory=list)
     failed_files: list[Path] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class MergeLedgerRecord:
+    merge_source: str
+    commit_sha: str | None = None
+    strategy: str = "stratified"
+    resolved_files: int = 0
+    exhausted_files: list[Path] = field(default_factory=list)
+    apply_status: str = "not_run"
+    integrity_status: str = "passed"
+    validation_status: str = "not_run"
 
 
 @dataclass(frozen=True)

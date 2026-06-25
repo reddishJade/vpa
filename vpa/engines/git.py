@@ -22,6 +22,7 @@ from vpa.orchestrator.models import (
     FileStatus,
     GitApplyResult,
     GitCommandResult,
+    GitMergeResult,
     GitOperationStatus,
     PromotionMethod,
 )
@@ -182,6 +183,50 @@ class GitEngine:
 
     def reset_to_checkpoint(self, checkpoint: str) -> GitCommandResult:
         return self._run_result(["reset", "--hard", checkpoint])
+
+    def merge(self, upstream_repo: str | Path, branch: str = "main") -> GitMergeResult:
+        fetch = self._run_result(["fetch", "--no-tags", str(upstream_repo), branch])
+        if fetch.returncode != 0:
+            return GitMergeResult(status=GitOperationStatus.FAILED, command=fetch)
+
+        result = self._run_result(["merge", "--no-edit", "FETCH_HEAD"])
+        if result.returncode == 0:
+            return GitMergeResult(
+                status=GitOperationStatus.APPLIED,
+                command=result,
+                commit_sha=self.current_head(),
+            )
+
+        conflicts = self.conflicted_files()
+        return GitMergeResult(
+            status=GitOperationStatus.CONFLICT if conflicts else GitOperationStatus.FAILED,
+            conflicts=conflicts,
+            command=result,
+        )
+
+    def merge_from_ref(self, ref: str) -> GitMergeResult:
+        remote = ref.split("/")[0]
+        fetch = self._run_result(["fetch", remote])
+        if fetch.returncode != 0:
+            return GitMergeResult(status=GitOperationStatus.FAILED, command=fetch)
+
+        result = self._run_result(["merge", "--no-edit", ref])
+        if result.returncode == 0:
+            return GitMergeResult(
+                status=GitOperationStatus.APPLIED,
+                command=result,
+                commit_sha=self.current_head(),
+            )
+
+        conflicts = self.conflicted_files()
+        return GitMergeResult(
+            status=GitOperationStatus.CONFLICT if conflicts else GitOperationStatus.FAILED,
+            conflicts=conflicts,
+            command=result,
+        )
+
+    def merge_abort(self) -> GitCommandResult:
+        return self._run_result(["merge", "--abort"])
 
     def conflicted_files(self) -> list[Path]:
         result = self._run_result(["diff", "--name-only", "--diff-filter=U"])
