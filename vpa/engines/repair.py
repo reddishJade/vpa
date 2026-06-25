@@ -33,8 +33,7 @@ class OpenAICompatibleConfig:
     model: str
     api_key: str | None = None
     base_url: str | None = None
-    temperature: float = 0.0
-    max_context_chars: int = 60_000
+    max_completion_tokens: int = 1000000
 
 
 class OpenAICompatibleSemanticPortClient:
@@ -47,7 +46,7 @@ class OpenAICompatibleSemanticPortClient:
         client = OpenAI(api_key=self.config.api_key, base_url=self.config.base_url)
         response = client.chat.completions.create(
             model=self.config.model,
-            temperature=self.config.temperature,
+            max_completion_tokens=self.config.max_completion_tokens,
             messages=[
                 {
                     "role": "system",
@@ -57,7 +56,7 @@ class OpenAICompatibleSemanticPortClient:
                     "role": "user",
                     "content": _semantic_port_user_prompt(
                         context,
-                        max_chars=self.config.max_context_chars,
+                        max_chars=self.config.max_completion_tokens,
                     ),
                 },
             ],

@@ -154,7 +154,7 @@ def main(argv=None):
             report_path=Path(args.report_path) if args.report_path else settings.report_path,
             gate_policy=policy,
         )
-        repair_engine = _build_repair_engine(args, settings)
+        repair_engine = _build_repair_engine(settings)
         try:
             orchestrator = PromotionOrchestrator(config, repair_engine=repair_engine)
         except ValueError as error:
@@ -182,25 +182,16 @@ def _optional_path(cli_value: str | None, config_value: Path | None) -> Path | N
     return value
 
 
-def _build_repair_engine(args, settings) -> RepairEngine:
+def _build_repair_engine(settings) -> RepairEngine:
     if not settings.llm.model:
         return RepairEngine()
-    api_key = os.getenv(settings.llm.api_key_env)
+    api_key = settings.llm.api_key or os.getenv(settings.llm.api_key_env)
     client = OpenAICompatibleSemanticPortClient(
         OpenAICompatibleConfig(
             model=settings.llm.model,
             api_key=api_key,
             base_url=settings.llm.base_url,
-            temperature=(
-                args.llm_temperature
-                if args.llm_temperature is not None
-                else settings.llm.temperature
-            ),
-            max_context_chars=(
-                args.llm_max_context_chars
-                if args.llm_max_context_chars is not None
-                else settings.llm.max_context_chars
-            ),
+            max_completion_tokens=settings.llm.max_completion_tokens,
         )
     )
     return RepairEngine(client)

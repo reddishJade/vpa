@@ -18,9 +18,9 @@ DEFAULT_CONFIG_PATH = Path("vpa.toml")
 class LLMSettings:
     model: str | None = None
     base_url: str | None = None
-    api_key_env: str = "OPENAI_API_KEY"
-    temperature: float = 0.0
-    max_context_chars: int = 60_000
+    api_key: str | None = None
+    api_key_env: str = "VPA_API_KEY"
+    max_completion_tokens: int = 1000000
 
 
 @dataclass(frozen=True)
@@ -75,9 +75,9 @@ def settings_from_dict(data: dict[str, Any]) -> VPASettings:
         llm=LLMSettings(
             model=_optional_string(llm.get("model")),
             base_url=_optional_string(llm.get("base_url")),
-            api_key_env=str(llm.get("api_key_env", "OPENAI_API_KEY")),
-            temperature=float(llm.get("temperature", 0.0)),
-            max_context_chars=int(llm.get("max_context_chars", 60_000)),
+            api_key=_optional_string(llm.get("api_key")),
+            api_key_env=str(llm.get("api_key_env", "VPA_API_KEY")),
+            max_completion_tokens=int(llm.get("max_completion_tokens", 1000000)),
         ),
     )
 

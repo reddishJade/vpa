@@ -26,6 +26,7 @@ risk_preference = "balanced"
 [llm]
 model = "your-model"
 base_url = "https://your-provider/v1"
-api_key_env = "VPA_API_KEY"
+# api_key = "sk-..."          # 直接配置 API key（优先于环境变量）
+api_key_env = "VPA_API_KEY"   # 环境变量名，存放 API key
 temperature = 0.0
 max_context_chars = 60000
