@@ -243,15 +243,17 @@ write hints for humans.
 Both agent paths share a common tool set:
 
 | Tool | Parameters | Scope | Used by |
-|---|---|---|---|
+|---|---|---|---|---|
 | `read` | `path`, `line_range?` | Read file content | resolve, translate |
 | `write` | `path`, `content` | Write complete file | resolve |
-| `grep` | `pattern`, `path` | Read-only search | resolve, translate |
+| `grep` | `pattern`, `path`, `context_lines?` | Recursive search in .c/.h files via grep(1) | resolve, translate |
+| `glob` | `pattern`, `path` | Find files by glob pattern under a directory | resolve, translate |
 | `bash` | `cmd` | Arbitrary shell command | resolve (git show :1:/:2:/:3:) |
 | `apply_patch` | `path`, `patch_text` | Apply structured diff | translate |
 
 Tool boundary rules:
-- `grep` is read-only and does not require file write permissions
+- `grep` is read-only and searches .c/.h files recursively via grep(1); paths are validated to be within the repo
+- `glob` is read-only and searches a directory tree by glob pattern; limit 200 results
 - `bash` is restricted to git commands and integrity checks
 - `write` is the only tool that creates or overwrites files
 - `apply_patch` verifies all hunks before writing any file

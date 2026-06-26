@@ -216,6 +216,7 @@ class RepairEngine:
         file_path: Path | None = None,
         context: CommitContext | None = None,
         max_retries: int = 3,
+        max_total_rounds: int = 30,
         messages: list[dict[str, Any]] | None = None,
         workspace: Path = Path("."),
     ) -> AgentLoopResult:
@@ -229,6 +230,12 @@ class RepairEngine:
         retry_count = 0
         iteration = 0
         while retry_count < max_retries:
+            if iteration >= max_total_rounds:
+                return AgentLoopResult(
+                    success=False,
+                    failure_code=FailureCode.MAX_RETRIES,
+                    status_reason=f"Agent loop exceeded {max_total_rounds} total rounds",
+                )
             response = _llm_call(self._llm_chat, self.model_name, messages, tools)
             _log_llm_debug(debug_log, op, iteration, messages, response)
             iteration += 1
@@ -246,12 +253,18 @@ class RepairEngine:
                 messages.append(msg_copy)
                 for call in msg["tool_calls"]:
                     args = json.loads(call["function"]["arguments"])
-                    result = _execute_tool(call["function"]["name"], args, op)
+                    result = _execute_tool(call["function"]["name"], args, op, workspace)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": call["id"],
                         "content": json.dumps(result),
                     })
+                if op == "resolve":
+                    written_file = _check_resolve_written(msg["tool_calls"], workspace)
+                    if written_file:
+                        content = written_file.read_text(encoding="utf-8")
+                        if not _CONFLICT_MARKER_RE.search(content):
+                            return AgentLoopResult(success=True, patched_files=[written_file])
                 continue
             integrity_error = _check_integrity(op, msg, workspace)
             if integrity_error is None:
@@ -332,7 +345,7 @@ def _llm_call(
 
 
 def _tools_for_op(op: str) -> list[dict[str, Any]]:
-    shared = [_tool_read(), _tool_grep(), _tool_bash()]
+    shared = [_tool_read(), _tool_grep(), _tool_glob(), _tool_bash()]
     if op == "resolve":
         return shared + [_tool_write()]
     if op == "translate":
@@ -368,12 +381,47 @@ def _tool_grep() -> dict[str, Any]:
         "type": "function",
         "function": {
             "name": "grep",
-            "description": "Search for a pattern in a file",
+            "description": "Recursively search .c/.h files for a pattern under a path",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string"},
-                    "path": {"type": "string"},
+                    "pattern": {
+                        "type": "string",
+                        "description": "Regex pattern to search for",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Directory or file to search in",
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "Number of context lines before/after each match",
+                        "default": 0,
+                    },
+                },
+                "required": ["pattern", "path"],
+            },
+        },
+    }
+
+
+def _tool_glob() -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": "glob",
+            "description": "Find files matching a glob pattern under a directory",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "Glob pattern, e.g. **/*.c, **/dynarec_rv64_*.c",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Base directory to search in",
+                    },
                 },
                 "required": ["pattern", "path"],
             },
@@ -434,10 +482,20 @@ def _tool_apply_patch() -> dict[str, Any]:
     }
 
 
-_READONLY_BASH_COMMANDS = {"git show", "git log", "git diff"}
+_READONLY_BASH_PREFIXES = ("git show", "git log", "git diff", "cd ")
+
+
+def _find_anchor(original: str, old: str) -> tuple[int, str]:
+    candidates = [old, old + "\n", old.rstrip("\n")]
+    for c in candidates:
+        idx = original.find(c)
+        if idx != -1:
+            return idx, c
+    return -1, ""
 
 
 def _apply_changeset(text: str, repo_root: Path = Path(".")) -> list[Path]:
+    text = _strip_changeset_fences(text)
     data = json.loads(text)
     changes = data.get("changes", [])
     patched: list[Path] = []
@@ -456,12 +514,12 @@ def _apply_changeset(text: str, repo_root: Path = Path(".")) -> list[Path]:
                 for edit in edits:
                     old = edit["old"]
                     new = edit["new"]
-                    idx = original.find(old)
+                    idx, actual = _find_anchor(original, old)
                     if idx == -1:
                         raise ValueError(f"Anchor not found in {path}")
-                    if original.find(old, idx + len(old)) != -1:
+                    if original.find(actual, idx + len(actual)) != -1:
                         raise ValueError(f"Multiple anchor matches in {path}")
-                    original = original[:idx] + new + original[idx + len(old):]
+                    original = original[:idx] + new + original[idx + len(actual):]
                 path.write_text(original, encoding="utf-8")
                 patched.append(path)
     return patched
@@ -470,7 +528,16 @@ def _apply_changeset(text: str, repo_root: Path = Path(".")) -> list[Path]:
 _CONFLICT_MARKER_RE = re.compile(r"<<<<<<< |=======|>>>>>>>")
 
 
+def _strip_changeset_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[-1] if "\n" in text else ""
+        text = text.rsplit("```", 1)[0].strip()
+    return text
+
+
 def _validate_changeset(text: str, repo_root: Path) -> str | None:
+    text = _strip_changeset_fences(text)
     try:
         data = json.loads(text)
     except json.JSONDecodeError as e:
@@ -488,10 +555,28 @@ def _validate_changeset(text: str, repo_root: Path) -> str | None:
         original = path.read_text(encoding="utf-8")
         for edit in edits:
             old = edit.get("old", "")
-            if original.find(old) == -1:
+            idx, actual = _find_anchor(original, old)
+            if idx == -1:
                 return f"Anchor not found in {path}"
-            if original.find(old, original.find(old) + len(old)) != -1:
+            if original.find(actual, idx + len(actual)) != -1:
                 return f"Multiple anchor matches in {path}"
+    return None
+
+
+def _check_resolve_written(tool_calls: list[dict], workspace: Path) -> Path | None:
+    for tc in tool_calls:
+        if tc["function"]["name"] != "write":
+            continue
+        try:
+            args = json.loads(tc["function"]["arguments"])
+        except (json.JSONDecodeError, KeyError):
+            continue
+        path = args.get("path", "")
+        if not path:
+            continue
+        full = workspace / path if not Path(path).is_absolute() else Path(path)
+        if full.exists():
+            return full
     return None
 
 
@@ -520,28 +605,32 @@ def _collect_patched(
     return []
 
 
-def _execute_tool(name: str, args: dict[str, Any], op: str) -> dict[str, Any]:
+def _execute_tool(
+    name: str, args: dict[str, Any], op: str, workspace: Path = Path("."),
+) -> dict[str, Any]:
     if name == "read":
-        return _tool_handler_read(args)
+        return _tool_handler_read(args, workspace)
     if name == "grep":
-        return _tool_handler_grep(args)
+        return _tool_handler_grep(args, workspace)
+    if name == "glob":
+        return _tool_handler_glob(args, workspace)
     if name == "bash":
         cmd = args.get("cmd", "")
-        if not any(cmd.startswith(prefix) for prefix in _READONLY_BASH_COMMANDS):
+        if not any(cmd.startswith(prefix) for prefix in _READONLY_BASH_PREFIXES):
             return {"error": f"Command not in whitelist: {cmd}"}
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         return {"stdout": result.stdout, "stderr": result.stderr, "returncode": result.returncode}
     if name == "write" and op == "resolve":
-        _tool_handler_write(args)
+        _tool_handler_write(args, workspace)
         return {"success": True}
     if name == "apply_patch" and op == "translate":
-        _tool_handler_apply_patch(args)
+        _tool_handler_apply_patch(args, workspace)
         return {"success": True}
     return {"error": f"Unknown tool or operation mismatch: {name}"}
 
 
-def _tool_handler_read(args: dict[str, Any]) -> dict[str, Any]:
-    path = Path(args["path"])
+def _tool_handler_read(args: dict[str, Any], workspace: Path = Path(".")) -> dict[str, Any]:
+    path = workspace / args["path"] if not Path(args["path"]).is_absolute() else Path(args["path"])
     if not path.exists():
         return {"error": f"File not found: {path}"}
     if path.is_dir():
@@ -555,26 +644,63 @@ def _tool_handler_read(args: dict[str, Any]) -> dict[str, Any]:
     return {"content": content, "size": len(content)}
 
 
-def _tool_handler_grep(args: dict[str, Any]) -> dict[str, Any]:
-    path = Path(args["path"])
-    if not path.exists():
-        return {"error": f"File not found: {path}"}
-    if path.is_dir():
-        return {"error": f"Path is a directory, not a file: {path}"}
+def _tool_handler_grep(args: dict[str, Any], workspace: Path = Path(".")) -> dict[str, Any]:
+    search_path = (workspace / args["path"]).resolve()
+    workspace_root = workspace.resolve()
+    try:
+        search_path.relative_to(workspace_root)
+    except ValueError:
+        return {"error": f"Path is outside repository: {args['path']}"}
+    if not search_path.exists():
+        return {"error": f"Path not found: {args['path']}"}
+    includes = ["--include=*.c", "--include=*.h"]
+    cmd = ["grep", "-n", "-r", "-H", *includes, args["pattern"], str(search_path)]
+    context = args.get("context_lines", 0)
+    if context:
+        cmd.extend(["-B", str(context), "-A", str(context)])
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode not in (0, 1):
+        return {"error": f"grep failed: {result.stderr.strip()}"}
     matches: list[dict[str, Any]] = []
-    for i, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-        if re.search(args["pattern"], line):
-            matches.append({"line": i, "text": line})
+    for line in result.stdout.splitlines():
+        parts = line.split(":", 2)
+        if len(parts) < 3:
+            continue
+        raw = Path(parts[0])
+        try:
+            fpath = str(raw.relative_to(workspace_root))
+        except ValueError:
+            fpath = parts[0]
+        matches.append({"file": fpath, "line": int(parts[1]), "text": parts[2]})
     return {"matches": matches, "count": len(matches)}
 
 
-def _tool_handler_write(args: dict[str, Any]) -> None:
-    Path(args["path"]).write_text(args["content"], encoding="utf-8")
+def _tool_handler_glob(args: dict[str, Any], workspace: Path = Path(".")) -> dict[str, Any]:
+    base = workspace / args["path"] if not Path(args["path"]).is_absolute() else Path(args["path"])
+    base = base.resolve()
+    ws = workspace.resolve()
+    try:
+        base.relative_to(ws)
+    except ValueError:
+        return {"error": f"Path is outside repository: {args['path']}"}
+    if not base.exists():
+        return {"error": f"Path not found: {args['path']}"}
+    if not base.is_dir():
+        return {"error": f"Path is not a directory: {args['path']}"}
+    pattern = args["pattern"]
+    matches = sorted(str(p.relative_to(base)) for p in base.rglob(pattern))
+    if len(matches) > 200:
+        matches = matches[:200]
+    return {"matches": matches, "count": len(matches)}
 
 
-def _tool_handler_apply_patch(args: dict[str, Any]) -> None:
-    # Parse unified diff, verify anchors, apply in memory, write
-    path = Path(args["path"])
+def _tool_handler_write(args: dict[str, Any], workspace: Path = Path(".")) -> None:
+    path = workspace / args["path"] if not Path(args["path"]).is_absolute() else Path(args["path"])
+    path.write_text(args["content"], encoding="utf-8")
+
+
+def _tool_handler_apply_patch(args: dict[str, Any], workspace: Path = Path(".")) -> None:
+    path = workspace / args["path"] if not Path(args["path"]).is_absolute() else Path(args["path"])
     patch_text = args["patch_text"]
     original = path.read_text(encoding="utf-8")
     lines = original.splitlines(keepends=True)
@@ -621,23 +747,23 @@ def _system_prompt(op: str) -> str:
         return (
             "You are VPA's merge conflict resolver. Given a file with git merge "
             "conflict markers, decide which side to keep or how to combine them. "
-            "Use the read tool to inspect the file, then write the resolved content."
+            "Use the read tool to inspect the file, then call `write` with the complete "
+            "resolved file content. Do NOT keep exploring after you have a solution."
         )
     if op == "translate":
         return (
             "You are VPA's ISA translation engine. Port the reference ISA change "
             "to the target ISA file(s).\n\n"
             "Rules:\n"
-            "1. FIRST use the read tool to inspect target files. Do NOT guess their content.\n"
-            "2. Use grep to search for relevant symbols or patterns.\n"
-            "3. Use git show/log/diff (via bash tool) to inspect commit history if needed.\n"
-            "4. When you have enough context, respond with a JSON ChangeSet.\n"
-            "5. Each edit's \"old\" string MUST be copied exactly from the file you read.\n"
-            "6. Do NOT include surrounding context that isn't in the file.\n"
-            "7. Do NOT use bash to search the filesystem. Use read/grep instead.\n\n"
+            "1. The reference patch and target file contents are provided below.\n"
+            "2. Each edit's \"old\" string MUST be copied exactly from the target file "
+            "content in the prompt. Do NOT guess or fabricate text.\n"
+            "3. Use grep/glob to find related definitions or patterns if needed.\n"
+            "4. When ready, respond with a JSON ChangeSet only — no explanations, "
+            "no markdown.\n\n"
             "ChangeSet format:\n"
             '{"changes": [{"op": "modify", "path": "src/dynarec/sw64_core3/foo.c", '
-            '"edits": [{"old": "exact text from file", "new": "replacement text"}]}]}'
+            '"edits": [{"old": "exact text from target file", "new": "replacement text"}]}]}'
         )
     return "You are VPA's agent."
 

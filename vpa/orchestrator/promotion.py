@@ -48,6 +48,7 @@ class PromotionConfig:
     build_command: str | None = None
     smoke_commands: list[str] = field(default_factory=list)
     dry_run: bool = False
+    max_source_conflicts: int = 0
     ledger_path: Path | None = None
     report_path: Path | None = None
     gate_policy: GatePolicy = field(default_factory=GatePolicy)
@@ -264,6 +265,8 @@ class PromotionOrchestrator:
         ref_paths += self.config.fallback_reference_isa_paths
         resolved: list[Path] = []
         failed: list[Path] = []
+        source_count = 0
+        max_source = self.config.max_source_conflicts
         for rel_path in conflict_files:
             full_path = self.config.local_repo / rel_path
             category = classify_conflict_file(rel_path, reference_isa_paths=ref_paths)
@@ -272,6 +275,10 @@ class PromotionOrchestrator:
             elif category == ConflictCategory.NON_SOURCE:
                 ok = self._resolve_non_source_conflict(rel_path)
             else:
+                if max_source and source_count >= max_source:
+                    failed.append(full_path)
+                    continue
+                source_count += 1
                 ok = self._resolve_source_conflict(rel_path)
             if ok:
                 resolved.append(full_path)
