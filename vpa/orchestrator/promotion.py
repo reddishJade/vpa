@@ -278,27 +278,18 @@ class PromotionOrchestrator:
             )
 
         if planned.gate_decision.kind == GateDecisionKind.NEEDS_SEMANTIC_PORT:
-            semantic = self._execute_isa_translate(planned)
-            semantic_status = semantic.git_result.status if semantic.git_result else None
-            if semantic_status == GitOperationStatus.SKIPPED:
-                if self.ledger is not None:
-                    for file_diff in planned.context.diff_context.files:
-                        if file_diff.path is not None:
-                            self.ledger.append(
-                                PendingConflictRecord(
-                                    commit_sha=planned.context.commit.sha,
-                                    commit_subject=planned.context.commit.subject,
-                                    file_path=file_diff.path,
-                                    category=ConflictCategory.ISA_BACKEND,
-                                    status="pending_semantic_port",
-                                )
+            if self.ledger is not None:
+                for file_diff in planned.context.diff_context.files:
+                    if file_diff.path is not None:
+                        self.ledger.append(
+                            PendingConflictRecord(
+                                commit_sha=planned.context.commit.sha,
+                                commit_subject=planned.context.commit.subject,
+                                file_path=file_diff.path,
+                                category=ConflictCategory.ISA_BACKEND,
+                                status="pending_semantic_port",
                             )
-            elif semantic_status != GitOperationStatus.APPLIED:
-                self.local_git.reset_to_checkpoint(checkpoint)
-                return semantic
-            else:
-                git_result = semantic.git_result
-                method = PromotionMethod.SEMANTIC_PORT
+                        )
 
         validation = run_validation(self.config.local_repo, _validation_commands(self.config))
         if validation.status == ValidationStatus.FAILED:

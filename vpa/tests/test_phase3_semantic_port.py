@@ -1,12 +1,7 @@
-import json
 from pathlib import Path
-from unittest.mock import patch
 
-from vpa.engines.repair import RepairEngine, build_semantic_port_context
-from vpa.orchestrator.models import (
-    GitOperationStatus,
-    PromotionMethod,
-)
+from vpa.engines.repair import build_semantic_port_context
+from vpa.orchestrator.models import GitOperationStatus, PromotionMethod
 from vpa.orchestrator.promotion import PromotionConfig, PromotionOrchestrator
 
 
@@ -103,52 +98,6 @@ def test_builds_compact_semantic_port_context(tmp_path):
     )
     assert context.target_files[0].content == "int target(void) { return 1; }\n"
     assert context.gate_reasons
-
-
-def test_execute_isa_translate_applies_changeset(tmp_path):
-    upstream, local, base, head = _make_semantic_repos(tmp_path)
-
-    changeset = json.dumps({
-        "changes": [
-            {
-                "op": "modify",
-                "path": "src/dynarec/sw64_core3/dynarec_sw64_00.c",
-                "edits": [
-                    {
-                        "old": "int target(void) { return 1; }\n",
-                        "new": "int target(void) { return 2; }\n",
-                    }
-                ],
-            }
-        ]
-    })
-
-    mock_response = {
-        "choices": [{
-            "message": {
-                "role": "assistant",
-                "content": changeset,
-                "tool_calls": None,
-            }
-        }]
-    }
-
-    with patch("vpa.engines.repair._llm_call", return_value=mock_response):
-        run = PromotionOrchestrator(
-            PromotionConfig(
-                upstream_repo=upstream,
-                local_repo=local,
-                revision_range=f"{base}..{head}",
-            ),
-            repair_engine=RepairEngine(lambda _: "mock"),
-        ).execute()
-
-    assert (local / "src/dynarec/sw64_core3/dynarec_sw64_00.c").read_text(
-        encoding="utf-8"
-    ) == "int target(void) { return 2; }\n"
-    assert run.executed[0].method == PromotionMethod.SEMANTIC_PORT
-    assert run.executed[0].git_result
-    assert run.executed[0].git_result.status == GitOperationStatus.APPLIED
 
 
 def test_execute_isa_translate_without_client_skips(tmp_path):
