@@ -139,6 +139,39 @@ op and structured ChangeSet output. Per-commit three-axis ledger display.
 
 ---
 
+## Post-Phase-3 Redesign
+
+### Preprocessor Conditional Hook
+
+- [x] Add `ConditionalClass` enum and `ClassifiedCommit.file_conditionals`
+- [x] Implement `vpa/analysis/preprocessor.py` with `#if`/`#ifdef`/`#elif`/`#else`/`#endif` parsing
+- [x] Fetch parent file content via `GitEngine.show_file(path, sha)`
+- [x] Upgrade shared files with RV64-only/SW64-only conditional changes to `cross_cutting`
+- [x] Add focused unit tests
+
+### Cherry-Pick Based Execution
+
+- [x] Replace bulk `git merge` with per-commit `git cherry-pick -x`
+- [x] Preserve upstream subject and `(cherry picked from commit <sha>)` provenance
+- [x] Roll back the entire upstream commit when any file conflict cannot be resolved
+- [x] Continue cherry-pick after stratified conflict resolution via `GitEngine.commit_cherry_pick`
+- [x] Update `PromotionRun` to remove `merge` field
+- [x] Update tests to assert per-commit cherry-pick behavior
+
+### v1.0.0 ISA Conflict Policy
+
+- [x] `PendingConflictRecord` model and ledger helper
+- [x] ISA backend conflicts record and defer to human review instead of auto-`--theirs`
+- [x] Skip later commits that touch pending human-review files
+- [x] LLM-based ISA backend conflict resolution deferred to v2+
+- [x] Add focused tests
+
+### Generated Path Filtering
+
+- [x] Filter generated/vendor files from `DiffContext` before planning
+- [x] Add `is_generated_or_vendor_path()` and `without_generated_files()` helpers
+- [x] Skip `generated_or_vendor` commits during execution
+
 ## Phase 4: Range Recovery And Operational MVP
 
 **Goal**: persist progress, resume interrupted runs, detect worktree drift.

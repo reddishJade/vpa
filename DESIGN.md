@@ -81,41 +81,30 @@ This data drives the conflict stratification strategy.
 
 ## Execution Strategy
 
-### Commit Grouping
+### Commit Execution Order
 
-Commits are executed in upstream order, grouped by consecutive same
-classification. Each group becomes one execution unit with its own checkpoint
-and validation:
+Commits are executed in upstream order. The Git operation is always per-commit
+(`git cherry-pick` or path-limited `git apply`) so that the resulting local
+history preserves the source of every upstream change. Classification grouping
+is still computed during planning for reporting and for optional validation
+batching, but each upstream commit gets its own checkpoint and is validated
+individually.
 
 ```text
 upstream commits (after classification):
   [A(shared), B(shared), C(ref_isa), D(shared), E(shared), F(ref_isa)]
 
-groups:
-  group_1: [A, B]      → merge path (shared_code)
-  group_2: [C]         → ISA translation path (reference_isa_change)
-  group_3: [D, E]      → merge path (shared_code)
-  group_4: [F]         → ISA translation path (reference_isa_change)
+execution:
+  A → cherry-pick, validate
+  B → cherry-pick, validate
+  C → cherry-pick reference files, semantic port to target ISA, validate
+  D → cherry-pick, validate
+  E → cherry-pick, validate
+  F → cherry-pick reference files, semantic port to target ISA, validate
 ```
 
-Group boundaries are determined by classification transitions. The group type
-determines the execution path:
-
-| Group type | Execution path | Rollback granularity | Validation |
-|---|---|---|---|
-| `shared_code` | `git merge` (one bulk merge, not per-commit) | entire group → checkpoint | group-level |
-| `reference_isa_change` | per-commit ISA translation via agent loop | per-commit → checkpoint (inside group) | group-level |
-| `target_isa_direct` | path-limited `git apply` per commit | per-commit → checkpoint | group-level |
-| `cross_cutting` | merge first, then ISA repair per commit | per-commit → checkpoint | group-level |
-| other | skip, record | — | — |
-
-Non-shared_code groups execute each commit individually (each has its own
-checkpoint and rollback), but validation runs once at group level. This ensures
-that a validation failure can be traced to exactly the group type that
-introduced it --- merge group failure = shared code issue, ISA translation
-group failure = porting issue.
-
-Group boundaries are computed during the planning phase, before execution:
+Group boundaries are determined by classification transitions and are used for
+plan rendering and reporting:
 
 ```python
 def group_commits(plan: PromotionPlan) -> list[CommitGroup]:
@@ -129,15 +118,40 @@ def group_commits(plan: PromotionPlan) -> list[CommitGroup]:
     return groups
 ```
 
-### 1. Mechanical Git Path (Shared Code Groups)
+### Preprocessing
 
-Use Git directly when the commit touches shared code or target-ISA files:
+Before classification, generated and vendor paths are removed from the diff
+context so they are never analyzed, mapped, or executed. For box64 this covers
+paths such as `src/wrapped/generated/` and `src/wrapped32/generated/`.
 
-- `git merge` for shared_code commits (one-time merge of the upstream branch)
-- `git cherry-pick` for individual commits when needed
-- `git apply -3` for path-limited patch application
+### Preprocessor Conditional Hook
 
-This path should not call an LLM. It records the Git operation, changed files,
+Path-only classification cannot detect ISA-specific changes that live inside
+shared source files guarded by C preprocessor conditionals. Box64 uses blocks
+such as `#if defined(RV64)` and, increasingly, `#if defined(RV64) || defined(SW64)`.
+
+During planning VPA fetches the parent version of each shared file from the
+upstream repository and parses the `#if`/`#ifdef`/`#elif`/`#else`/`#endif`
+stack. Changed hunks that fall inside an RV64-only or SW64-only conditional
+block upgrade the file classification from `shared_code` to `cross_cutting`,
+because the same logical change usually needs a corresponding update in the
+target ISA. Changes inside `#if defined(RV64) || defined(SW64)` remain
+`shared_code`: the SW64 code path already receives the change mechanically.
+
+### 1. Mechanical Git Path (Per-Commit Cherry-Pick)
+
+VPA's main execution unit is the upstream commit, applied in order with
+`git cherry-pick`. Each successful cherry-pick keeps the original upstream
+subject and adds `(cherry picked from commit <sha>)`, preserving provenance.
+
+- `shared_code` and `cross_cutting` commits are cherry-picked.
+- `target_isa_direct` commits use path-limited `git apply -3` when only target
+  files should be taken.
+- `reference_isa_change` commits are also cherry-picked to keep the reference
+  ISA files in sync with upstream, followed by semantic porting to the target
+  ISA when required.
+
+This path does not call an LLM. It records the Git operation, changed files,
 and validation result.
 
 ### 2. Reference-ISA Semantic Path
@@ -148,7 +162,8 @@ behavior.
 
 Workflow:
 
-1. Detect that the commit touches reference ISA files.
+1. Detect that the commit touches reference ISA files (or RV64-only conditional
+   blocks inside shared files).
 2. Analyze the reference diff with lightweight workflow heuristics.
 3. If the change is non-semantic, record `no_target_change` and continue.
 4. Map changed reference files/symbols to target ISA candidates.
@@ -174,23 +189,28 @@ The LLM may propose a small repair patch. VPA reruns validation after the patch.
 If the second validation fails, the commit enters `exhausted` state in the
 ledger.
 
-### 4. Merge Conflict Stratified Resolution
+### 4. Cherry-Pick Conflict Stratified Resolution
 
-Use this path when `git merge` reports textual conflicts.
+Use this path when `git cherry-pick` reports textual conflicts.
 
-Conflicts are classified by file path into three categories:
+Because commits are atomic, a cherry-pick with any unresolved conflict causes
+the entire upstream commit to be rolled back. Conflicts are classified by file
+path into three categories:
 
-| Category | Criteria | Action |
+| Category | Criteria | Action (v1.0.0) |
 |---|---|---|
-| ISA backend | `src/dynarec/{rv64,arm64,la64}/*` | `checkout --theirs` + ledger SYNCED |
-| Non-source | `*.md`, `*.yml`, `CMakeLists.txt`, docs, CI, etc. | LLM agent loop; fallback `--theirs` + ledger |
-| Source files | All other `src/` files | LLM agent loop; failure = ledger `exhausted` |
+| ISA backend | `src/dynarec/{rv64,arm64,la64}/*` | Record pending human review, rollback commit |
+| Non-source | `*.md`, `*.yml`, `CMakeLists.txt`, docs, CI, etc. | LLM agent loop; fallback `--theirs` |
+| Source files | All other `src/` files | LLM agent loop; failure = rollback commit |
 
-This stratification is data-driven: ISA backend files in the local fork contain
-zero SW64-specific modifications (all local changes came from upstream syncs),
-so accepting `theirs` is safe. Non-source file conflicts are typically trivial
-(README, CI, CMake). Source files contain real semantic divergence that may
-require LLM resolution or downstream agent attention.
+In v1.0.0 ISA backend conflicts are deliberately **not** auto-resolved. The
+reference ISA files often carry semantic changes that must be mirrored in the
+target ISA (`sw64_core3`), so a blind `checkout --theirs` is unsafe. Instead,
+VPA writes a `PendingConflictRecord` to the ledger and rolls the commit back.
+Subsequent upstream commits that touch the same pending file are skipped until
+a human resolves the conflict and appends a resolution record to the ledger.
+
+LLM-based resolution of ISA backend conflicts is reserved for v2+.
 
 The per-file classification uses glob matching:
 
@@ -394,6 +414,7 @@ Construction order is explicit:
 
 ```text
 CommitInfo + DiffContext
+  -> preprocessor hook (shared-file conditional blocks)
   -> classifier
   -> isa_mapper
   -> CommitContext(full)
@@ -403,8 +424,9 @@ CommitInfo + DiffContext
 ```
 
 Do not model this as one partially filled object with optional fields. Use a
-base context for `CommitInfo + DiffContext`, then construct the full
-`CommitContext` after classification and ISA mapping are available.
+base context for `CommitInfo + DiffContext`, enrich it with conditional
+classification, then construct the full `CommitContext` after classification
+and ISA mapping are available.
 
 Core records:
 
@@ -537,14 +559,15 @@ its output is always text (resolved file content, structured ChangeSet).
 
 | Operation | GitEngine method | Called by |
 |---|---|---|
-| merge | `merge_from_ref(ref)` | orchestrator.`_execute_merge` |
 | cherry-pick | `cherry_pick_from(repo, sha)` | orchestrator.`_apply_mechanical_commit` |
+| continue cherry-pick | `commit_cherry_pick(message, author)` | orchestrator after conflict resolution |
 | apply patch (3-way) | `apply_patch_3way(patch)` | orchestrator (path-limited or semantic) |
-| fetch | `_run_result(["fetch", ...])` | orchestrator via merge/cherry-pick |
-| checkpoint | `checkpoint()` (git rev-parse HEAD) | orchestrator before operations |
+| fetch | `_run_result(["fetch", ...])` | orchestrator via cherry-pick |
+| show file | `show_file(path, sha)` | orchestrator/preprocessor hook |
+| checkpoint | `checkpoint()` (git rev-parse HEAD) | orchestrator before each commit |
 | reset hard | `reset_to_checkpoint(sha)` | orchestrator rollback |
 | add | `_run_result(["add", path])` | orchestrator after agent loop returns `patched_files` |
-| commit | `_run_result(["commit", ...])` | orchestrator after merge/apply |
+| commit | `_run_result(["commit", ...])` | orchestrator after apply/semantic port |
 
 ### RepairEngine Boundary
 
@@ -582,10 +605,10 @@ Rollback always uses `git reset --hard <checkpoint>`. There is no per-file
 recovery mechanism. The ledger records each file's state for audit, but the
 rollback mechanism is always at checkpoint granularity.
 
-When a merge produces conflicts that include `exhausted` files (agent loop
-could not resolve), the entire merge is rolled back to the pre-merge checkpoint.
-The ledger retains the resolution records so that subsequent runs can skip
-exhausted files.
+When a cherry-pick produces conflicts that include `exhausted` files (agent loop
+could not resolve), the entire upstream commit is rolled back to the pre-commit
+checkpoint. The ledger retains the conflict records so that subsequent runs can
+inspect them.
 
 ## LLM Boundary
 
@@ -695,6 +718,7 @@ vpa/
     classifier.py      Commit and file classification
     change_analyzer.py Lightweight diff semantics and LLM gate signals
     isa_mapper.py      Reference ISA -> target ISA file/symbol mapping
+    preprocessor.py    Preprocessor conditional hook for shared files
   ledger/
     store.py           Append-only result records (merge, commit, exhausted)
     report.py          Human and machine-readable summaries

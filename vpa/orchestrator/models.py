@@ -38,6 +38,15 @@ class CommitClass(StrEnum):
     UNKNOWN = "unknown"
 
 
+class ConditionalClass(StrEnum):
+    NONE = "none"
+    RV64_ONLY = "rv64_only"
+    SW64_ONLY = "sw64_only"
+    RV64_OR_SW64 = "rv64_or_sw64"
+    NOT_RV64 = "not_rv64"
+    AMBIGUOUS = "ambiguous"
+
+
 class MappingStatus(StrEnum):
     MAPPED = "mapped"
     MISSING_TARGET = "missing_target"
@@ -127,6 +136,7 @@ class CommitInfo:
     subject: str
     author: str | None = None
     author_date: str | None = None
+    parent_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +187,7 @@ class ClassifiedCommit:
     kind: CommitClass
     file_classes: dict[Path, CommitClass]
     reasons: list[str] = field(default_factory=list)
+    file_conditionals: dict[Path, ConditionalClass] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -311,15 +322,12 @@ class MergeConflictResolution:
 
 
 @dataclass(frozen=True)
-class MergeLedgerRecord:
-    merge_source: str
-    commit_sha: str | None = None
-    strategy: str = "stratified"
-    resolved_files: int = 0
-    exhausted_files: list[Path] = field(default_factory=list)
-    apply_status: str = "not_run"
-    integrity_status: str = "passed"
-    validation_status: str = "not_run"
+class PendingConflictRecord:
+    commit_sha: str
+    commit_subject: str
+    file_path: Path
+    category: ConflictCategory
+    status: str = "pending_human_review"
 
 
 @dataclass(frozen=True)

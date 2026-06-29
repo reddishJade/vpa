@@ -80,11 +80,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override maximum semantic-port prompt size before truncation",
     )
-    promote_p.add_argument(
-        "--merge-source",
-        default=None,
-        help="Git ref to merge for shared code (default: upstream/main)",
-    )
     return parser
 
 
@@ -117,11 +112,6 @@ def main(argv=None):
             upstream_repo=upstream_repo,
             local_repo=local_repo,
             revision_range=revision_range,
-            merge_source=(
-                args.merge_source
-                if args.merge_source is not None
-                else settings.merge_source
-            ),
             target_isa_path=(
                 Path(args.target_isa_path) if args.target_isa_path else settings.target_isa_path
             ),

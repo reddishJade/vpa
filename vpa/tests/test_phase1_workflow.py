@@ -2,8 +2,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 from vpa.analysis.change_analyzer import analyze
-from vpa.analysis.classifier import classify_commit
+from vpa.analysis.classifier import classify_commit, without_generated_files
 from vpa.analysis.isa_mapper import map_reference_files
+from vpa.analysis.preprocessor import (
+    analyze_file_conditionals,
+    classify_diff_context_conditionals,
+    classify_file_diff_conditionals,
+)
 from vpa.engines.git import parse_diff_context
 from vpa.main import main
 from vpa.orchestrator.llm_gate import decide
@@ -12,6 +17,8 @@ from vpa.orchestrator.models import (
     CommitClass,
     CommitContext,
     CommitInfo,
+    ConditionalClass,
+    DiffContext,
     GateDecisionKind,
     GatePolicy,
     MappingStatus,
@@ -246,3 +253,118 @@ api_key_env = "VPA_TEST_API_KEY"
     assert client.config.base_url == "https://llm.example/v1"
     assert client.config.api_key == "secret"
     assert "VPA promotion execution" in capsys.readouterr().out
+
+
+def test_preprocessor_detects_rv64_only_block():
+    raw_patch = """diff --git a/src/core.c b/src/core.c
+--- a/src/core.c
++++ b/src/core.c
+@@ -3,3 +3,3 @@
+ #if defined(RV64)
+-int rv = 1;
++int rv = 2;
+ #endif
+"""
+    old_content = "common\n#if defined(RV64)\nint rv = 1;\n#endif\n"
+    file_diff = _diff_context(raw_patch).files[0]
+    conditional = classify_file_diff_conditionals(file_diff, old_content)
+    assert conditional == ConditionalClass.RV64_ONLY
+
+
+def test_preprocessor_detects_rv64_or_sw64_shared_block():
+    raw_patch = """diff --git a/src/core.c b/src/core.c
+--- a/src/core.c
++++ b/src/core.c
+@@ -3,3 +3,3 @@
+ #if defined(RV64) || defined(SW64)
+-int val = 1;
++int val = 2;
+ #endif
+"""
+    old_content = "common\n#if defined(RV64) || defined(SW64)\nint val = 1;\n#endif\n"
+    file_diff = _diff_context(raw_patch).files[0]
+    conditional = classify_file_diff_conditionals(file_diff, old_content)
+    assert conditional == ConditionalClass.RV64_OR_SW64
+
+
+def test_classifier_upgrades_shared_file_with_rv64_conditional():
+    raw_patch = """diff --git a/src/core.c b/src/core.c
+--- a/src/core.c
++++ b/src/core.c
+@@ -3,3 +3,3 @@
+ #if defined(RV64)
+-int rv = 1;
++int rv = 2;
+ #endif
+"""
+    diff_context = _diff_context(raw_patch)
+    file_diff = diff_context.files[0]
+    assert file_diff.path is not None
+    old_content = "common\n#if defined(RV64)\nint rv = 1;\n#endif\n"
+    conditionals = {file_diff.path: classify_file_diff_conditionals(file_diff, old_content)}
+    classified = classify_commit(diff_context, file_conditionals=conditionals)
+
+    assert classified.kind == CommitClass.CROSS_CUTTING
+    assert classified.file_conditionals[Path("src/core.c")] == ConditionalClass.RV64_ONLY
+
+
+def test_diff_context_conditional_classification_with_resolver():
+    raw_patch = """diff --git a/src/core.c b/src/core.c
+--- a/src/core.c
++++ b/src/core.c
+@@ -3,3 +3,3 @@
+ #if defined(RV64)
+-int rv = 1;
++int rv = 2;
+ #endif
+"""
+    diff_context = _diff_context(raw_patch)
+    commit_with_parent = CommitInfo(
+        sha=diff_context.commit.sha,
+        subject=diff_context.commit.subject,
+        parent_sha="parent",
+    )
+    diff_context = DiffContext(
+        commit=commit_with_parent,
+        raw_patch=diff_context.raw_patch,
+        files=diff_context.files,
+    )
+
+    def resolver(path, sha):
+        assert sha == "parent"
+        return "common\n#if defined(RV64)\nint rv = 1;\n#endif\n"
+
+    result = classify_diff_context_conditionals(diff_context, resolver)
+    assert result[Path("src/core.c")] == ConditionalClass.RV64_ONLY
+
+
+def test_analyze_file_conditionals_tracks_nested_stack():
+    content = """#if defined(RV64)
+#if defined(SW64)
+both
+#endif
+rv64
+#endif
+"""
+    active = analyze_file_conditionals(content)
+    assert all(
+        any(d.covers_rv64() for d in stack)
+        for stack in active.values()
+        if stack
+    )
+    # Line 3 ("both") is inside both RV64 and SW64 conditionals.
+    assert any(d.covers_rv64() for d in active[3])
+    assert any(d.covers_sw64() for d in active[3])
+
+
+def test_generated_files_are_removed_from_diff_context():
+    raw_patch = """diff --git a/src/wrapped/generated/wrapper.c b/src/wrapped/generated/wrapper.c
+--- a/src/wrapped/generated/wrapper.c
++++ b/src/wrapped/generated/wrapper.c
+@@ -1 +1 @@
+-old
++new
+"""
+    diff_context = _diff_context(raw_patch)
+    filtered = without_generated_files(diff_context)
+    assert len(filtered.files) == 0

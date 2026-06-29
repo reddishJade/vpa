@@ -31,6 +31,18 @@ class LedgerStore:
         with self.path.open(encoding="utf-8") as file:
             return [json.loads(line) for line in file if line.strip()]
 
+    def pending_conflict_files(self) -> set[str]:
+        """Return file paths currently marked as pending human review."""
+        pending: set[str] = set()
+        for entry in self.read_all():
+            record = entry.get("record", {})
+            if record.get("status") == "pending_human_review" and "file_path" in record:
+                pending.add(record["file_path"])
+            # A later resolution record removes the pending status.
+            if record.get("status") == "resolved" and "file_path" in record:
+                pending.discard(record["file_path"])
+        return pending
+
 
 def _to_jsonable(value: Any) -> Any:
     if is_dataclass(value) and not isinstance(value, type):

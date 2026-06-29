@@ -46,14 +46,17 @@ class GitEngine:
         return [line for line in result.stdout.splitlines() if line]
 
     def read_commit(self, sha: str) -> CommitInfo:
-        fmt = "%H%x00%s%x00%an <%ae>%x00%aI"
+        fmt = "%H%x00%s%x00%an <%ae>%x00%aI%x00%P"
         result = self._run(["show", "-s", f"--format={fmt}", sha])
-        commit_sha, subject, author, author_date = result.stdout.rstrip("\n").split("\x00", 3)
+        parts = result.stdout.rstrip("\n").split("\x00", 4)
+        commit_sha, subject, author, author_date = parts[:4]
+        parent_sha = parts[4].split()[0] if len(parts) > 4 and parts[4].strip() else None
         return CommitInfo(
             sha=commit_sha,
             subject=subject,
             author=author,
             author_date=author_date,
+            parent_sha=parent_sha,
         )
 
     def read_raw_patch(self, sha: str) -> str:
@@ -69,6 +72,13 @@ class GitEngine:
 
     def current_head(self) -> str:
         return self.checkpoint()
+
+    def show_file(self, path: str | Path, sha: str) -> str | None:
+        try:
+            result = self._run(["show", f"{sha}:{path}"])
+            return result.stdout
+        except subprocess.CalledProcessError:
+            return None
 
     def tracked_changes(self) -> list[Path]:
         result = self._run_result(["status", "--porcelain", "--untracked-files=no"])
@@ -97,7 +107,7 @@ class GitEngine:
                 conflicts=self.conflicted_files(),
             )
 
-        result = self._run_result(["cherry-pick", "--no-edit", "FETCH_HEAD"])
+        result = self._run_result(["cherry-pick", "--no-edit", "-x", "FETCH_HEAD"])
         if result.returncode == 0:
             return GitApplyResult(
                 status=GitOperationStatus.APPLIED,
@@ -180,6 +190,20 @@ class GitEngine:
 
     def abort_cherry_pick(self) -> GitCommandResult:
         return self._run_result(["cherry-pick", "--abort"])
+
+    def commit_cherry_pick(
+        self,
+        message: str,
+        author: str | None = None,
+    ) -> GitCommandResult:
+        args = [
+            "-c", "user.name=VPA",
+            "-c", "user.email=vpa@example.invalid",
+        ]
+        if author:
+            args.extend(["--author", author])
+        args.extend(["commit", "-m", message])
+        return self._run_result(args)
 
     def reset_to_checkpoint(self, checkpoint: str) -> GitCommandResult:
         return self._run_result(["reset", "--hard", checkpoint])
