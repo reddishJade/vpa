@@ -19,6 +19,9 @@ cat /tmp/vpa_test_real/test.toml
 # [isa]
 # reference_isa_path = "src/dynarec/rv64"
 # target_isa_path = "src/dynarec/sw64_core3"
+#
+# [validation]
+# verify_command = "cmake --build build && ctest --output-on-failure"
 ```
 
 ## 重置测试环境
@@ -184,4 +187,9 @@ upstream commit
        pending  --theirs
        +        + 继续
        rollback
+             │
+             ▼
+    verify_command (可选，全部完成后)
+     ── cmake --build build
+     ── ctest --output-on-failure
 ```

@@ -82,6 +82,26 @@ The report lists:
   category (`ISA_BACKEND` / `SOURCE`)
 - Sample committed and rolled-back commits
 
+### `vpa verify`
+
+Build and run tests on the local repo after promotion, without rolling back
+commits on failure. Useful for batch validation after all cherry-picks.
+
+```bash
+uv run vpa verify \
+  --config vpa.toml \
+  --verify-cmd "cmake --build build && ctest --output-on-failure"
+```
+
+| Argument | Description |
+|---|---|
+| `--config <path>` | TOML config file (default: `vpa.toml`) |
+| `--local-repo <path>` | Override local target repo |
+| `--verify-cmd <cmd>` | Override verify command |
+
+When `verify_command` is set in the config, `vpa promote --execute` also runs
+it automatically after all commits are processed and reports the result.
+
 ## Configuration
 
 VPA reads `vpa.toml` from the current directory. CLI flags override
@@ -100,6 +120,7 @@ fallback_reference_isa_paths = ["src/dynarec/arm64", "src/dynarec/la64"]
 [validation]
 build_command = "cmake --build build"
 smoke_commands = ["ctest --test-dir build"]
+verify_command = "cmake --build build && ctest --output-on-failure"
 
 [output]
 ledger_path = "ledger.jsonl"
