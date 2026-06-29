@@ -155,16 +155,6 @@ class PromotionOrchestrator:
             if planned.context.classification.kind == CommitClass.GENERATED_OR_VENDOR:
                 executed.append(self._skip_commit(planned, "generated/vendor path"))
                 continue
-            pending_files = self.ledger.pending_conflict_files() if self.ledger else set()
-            touched_pending = _touches_pending_files(planned, pending_files)
-            if touched_pending:
-                executed.append(
-                    self._skip_commit(
-                        planned,
-                        f"touches pending human-review files: {', '.join(touched_pending)}",
-                    )
-                )
-                continue
             result = self._execute_commit(planned)
             executed.append(result)
             if self.ledger:
@@ -464,10 +454,7 @@ class PromotionOrchestrator:
         )
 
     def _rollback(self, checkpoint: str, git_result: GitApplyResult) -> None:
-        if (
-            git_result.status == GitOperationStatus.CONFLICT
-            and git_result.method == PromotionMethod.CHERRY_PICK
-        ):
+        if git_result.method == PromotionMethod.CHERRY_PICK:
             self.local_git.abort_cherry_pick()
         self.local_git.reset_to_checkpoint(checkpoint)
 
