@@ -32,6 +32,7 @@ class VPASettings:
     fallback_reference_isa_paths: list[Path] = field(default_factory=list)
     build_command: str | None = None
     smoke_commands: list[str] = field(default_factory=list)
+    verify_command: str | None = None
     merge_source: str = "upstream/main"
     ledger_path: Path | None = None
     report_path: Path | None = None
@@ -67,6 +68,7 @@ def settings_from_dict(data: dict[str, Any]) -> VPASettings:
         ],
         build_command=_optional_string(validation.get("build_command")),
         smoke_commands=_string_list(validation.get("smoke_commands")),
+        verify_command=_optional_string(validation.get("verify_command")),
         ledger_path=_optional_path(output.get("ledger_path")),
         report_path=_optional_path(output.get("report_path")),
         risk_preference=str(gate.get("risk_preference", "balanced")),

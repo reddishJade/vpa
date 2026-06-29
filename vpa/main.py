@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override configured smoke/test command (repeatable)",
     )
+    promote_p.add_argument("--verify-cmd", default=None, help="Override configured verify command")
     promote_p.add_argument("--ledger-path", default=None, help="Override ledger artifact path")
     promote_p.add_argument("--report-path", default=None, help="Override report artifact path")
     promote_p.add_argument("--dry-run", action="store_true", help="Plan without mutating repos")
@@ -85,6 +86,15 @@ def build_parser() -> argparse.ArgumentParser:
     inspect_p = sub.add_parser("inspect", help="Read a ledger file and print a human-readable report")
     inspect_p.add_argument("--ledger-path", required=True, help="Path to ledger JSONL file")
     inspect_p.add_argument("--output", "-o", default=None, help="Write report to file instead of stdout")
+
+    verify_p = sub.add_parser("verify", help="Build and run tests on the local repo")
+    verify_p.add_argument(
+        "--config",
+        default=None,
+        help=f"Path to TOML config file; defaults to .\\{DEFAULT_CONFIG_PATH}",
+    )
+    verify_p.add_argument("--local-repo", default=None, help="Override local target repo")
+    verify_p.add_argument("--verify-cmd", default=None, help="Override configured verify command")
     return parser
 
 
@@ -100,6 +110,26 @@ def main(argv=None):
         else:
             print(report)
         return
+
+    if args.command == "verify":
+        settings = load_settings(Path(args.config) if args.config else None)
+        local_repo = _optional_path(args.local_repo, settings.local_repo)
+        if local_repo is None:
+            parser.error("local_repo is required in vpa.toml or --local-repo")
+        verify_cmd = args.verify_cmd or settings.verify_command
+        if not verify_cmd:
+            parser.error("verify_command is required in vpa.toml or --verify-cmd")
+        from vpa.engines.validation import run_validation
+        from vpa.orchestrator.models import ValidationStatus
+        result = run_validation(local_repo, [verify_cmd])
+        for cmd in result.commands:
+            status = "PASSED" if cmd.status == ValidationStatus.PASSED else "FAILED"
+            print(f"  {cmd.command}")
+            print(f"    status: {status} (exit {cmd.returncode})")
+            if cmd.stderr.strip():
+                for line in cmd.stderr.splitlines():
+                    print(f"    {line}")
+        sys.exit(0 if result.status == ValidationStatus.PASSED else 1)
 
     if args.command == "promote":
         try:
@@ -140,6 +170,9 @@ def main(argv=None):
             build_command=args.build_cmd if args.build_cmd is not None else settings.build_command,
             smoke_commands=(
                 args.smoke_test if args.smoke_test is not None else settings.smoke_commands
+            ),
+            verify_command=(
+                args.verify_cmd if args.verify_cmd is not None else settings.verify_command
             ),
             dry_run=args.dry_run,
             ledger_path=Path(args.ledger_path) if args.ledger_path else settings.ledger_path,

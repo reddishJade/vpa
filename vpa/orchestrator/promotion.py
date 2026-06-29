@@ -51,6 +51,7 @@ class PromotionConfig:
     fallback_reference_isa_paths: list[Path] = field(default_factory=list)
     build_command: str | None = None
     smoke_commands: list[str] = field(default_factory=list)
+    verify_command: str | None = None
     dry_run: bool = False
     max_source_conflicts: int = 0
     ledger_path: Path | None = None
@@ -88,6 +89,7 @@ class ExecutedCommit:
 class PromotionRun:
     plan: PromotionPlan
     executed: list[ExecutedCommit] = field(default_factory=list)
+    verification: ValidationResult | None = None
 
 
 class PromotionOrchestrator:
@@ -167,7 +169,10 @@ class PromotionOrchestrator:
             if self.ledger:
                 self.ledger.append(_ledger_record(result))
 
-        return PromotionRun(plan=plan, executed=executed)
+        verification: ValidationResult | None = None
+        if self.config.verify_command and not self.config.dry_run:
+            verification = run_validation(self.config.local_repo, [self.config.verify_command])
+        return PromotionRun(plan=plan, executed=executed, verification=verification)
 
     def _skip_commit(self, planned: PlannedCommit, reason: str) -> ExecutedCommit:
         return ExecutedCommit(
@@ -506,6 +511,19 @@ def render_run(run: PromotionRun) -> str:
                     lines.extend(f"    {line}" for line in stderr)
     if not run.executed:
         lines.append("(no commits executed)")
+    if run.verification:
+        lines.append("")
+        lines.append("Post-run verification")
+        lines.append("-" * 40)
+        for cmd in run.verification.commands:
+            status = "PASSED" if cmd.status == ValidationStatus.PASSED else "FAILED"
+            lines.append(f"  {cmd.command}")
+            lines.append(f"    status: {status} (exit {cmd.returncode})")
+            if cmd.stderr.strip():
+                stderr = _first_nonempty_lines(cmd.stderr)
+                if stderr:
+                    lines.append("    stderr:")
+                    lines.extend(f"      {line}" for line in stderr)
     return "\n".join(lines)
 
 
