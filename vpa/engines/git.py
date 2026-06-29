@@ -199,10 +199,10 @@ class GitEngine:
         args = [
             "-c", "user.name=VPA",
             "-c", "user.email=vpa@example.invalid",
+            "commit", "-m", message,
         ]
         if author:
             args.extend(["--author", author])
-        args.extend(["commit", "-m", message])
         return self._run_result(args)
 
     def reset_to_checkpoint(self, checkpoint: str) -> GitCommandResult:
