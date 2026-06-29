@@ -1,37 +1,16 @@
 # VPA TODO
 
-## Done
+## Next
 
-### Post-Phase-3 Redesign
+- [ ] **断点恢复** — execute() 前检查 ledger 中已有 SHA，跳过已处理的 commit，
+      避免重跑时重复 cherry-pick 已提交的 commit
+- [ ] **`box64-2-sw64/` 加入 `.gitignore`** — 防止 `git add -A` 意外捡入
 
-- Preprocessor conditional hook (`vpa/analysis/preprocessor.py`)
-- Cherry-pick based execution (replace bulk `git merge`)
-- v1.0.0 ISA conflict policy: `PendingConflictRecord`, defer to human
-- Generated/vendor path filtering
-- Disable LLM for semantic port and conflict resolution (v1.0.0)
-- `--author` position fix in `commit_cherry_pick`
-- Remove pending-file blocking in execute loop
-- Unconditional `cherry-pick --abort` on rollback
-- `vpa inspect` CLI subcommand for human-readable ledger report
-- `LEDGER.md` documenting ledger schema
+## Later
 
-## Phase 4: Range Recovery And Operational MVP
-
-**Goal**: persist progress, resume interrupted runs, detect worktree drift.
-
-- [ ] Persist per-commit progress in ledger or run-state file
-- [ ] Resume partially completed run from last successful checkpoint
-- [ ] Detect worktree mismatch with recorded safe point
-- [ ] Record enough metadata to explain and recover failed runs
-
-## Post-MVP
-
-- [ ] Optional AST analyzer (libclang/tree-sitter when available)
-- [ ] Symbol-name mapping beyond path convention
-- [ ] Fallback reference triangulation (la64, arm64)
-- [ ] Validation-repair retry policy
-- [ ] Conflict-resolution repair path
-- [ ] Integration tests against reduced fixture
+- [ ] **冲突自动修复路径** (v2) — 调 LLM 自动解决 `isa_backend` / `source` 冲突
+- [ ] **验证-修复重试策略** — validation 失败后调 LLM 修一次再验证
+- [ ] **精简 fixture 的集成测试** — 端到端测试真实 repo 流程
 
 ## Definition Of Done
 
