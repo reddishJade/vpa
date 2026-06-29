@@ -84,6 +84,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     inspect_p = sub.add_parser("inspect", help="Read a ledger file and print a human-readable report")
     inspect_p.add_argument("--ledger-path", required=True, help="Path to ledger JSONL file")
+    inspect_p.add_argument("--output", "-o", default=None, help="Write report to file instead of stdout")
     return parser
 
 
@@ -92,7 +93,12 @@ def main(argv=None):
     args = parser.parse_args(argv)
 
     if args.command == "inspect":
-        print(render_ledger(args.ledger_path))
+        report = render_ledger(args.ledger_path)
+        if args.output:
+            Path(args.output).write_text(report, encoding="utf-8")
+            print(f"Report written to {args.output}")
+        else:
+            print(report)
         return
 
     if args.command == "promote":
