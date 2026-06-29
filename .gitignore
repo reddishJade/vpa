@@ -26,6 +26,13 @@ vpa.toml
 # Default output directory
 promotion_output/
 
+# User-provided data
+box64-2-sw64/
+box64_2_sw64.tar.gz
+
+# Local test output
+logs/
+
 # IDE / editor
 .vscode/
 .idea/

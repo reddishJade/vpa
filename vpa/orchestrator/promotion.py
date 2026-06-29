@@ -151,7 +151,14 @@ class PromotionOrchestrator:
         self.ledger = LedgerStore(self.config.ledger_path) if self.config.ledger_path else None
 
         executed: list[ExecutedCommit] = []
+        processed_shas: set[str] = set()
+        if self.ledger:
+            processed_shas = self.ledger.processed_commits()
         for planned in plan.commits:
+            sha = planned.context.commit.sha
+            if sha in processed_shas:
+                executed.append(self._skip_commit(planned, "already processed in ledger"))
+                continue
             if planned.context.classification.kind == CommitClass.GENERATED_OR_VENDOR:
                 executed.append(self._skip_commit(planned, "generated/vendor path"))
                 continue

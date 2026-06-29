@@ -31,6 +31,18 @@ class LedgerStore:
         with self.path.open(encoding="utf-8") as file:
             return [json.loads(line) for line in file if line.strip()]
 
+    def processed_commits(self) -> set[str]:
+        """Return SHAs already recorded as commit execution entries."""
+        shas: set[str] = set()
+        for entry in self.read_all():
+            record = entry.get("record", {})
+            commit = record.get("commit") if isinstance(record, dict) else None
+            if isinstance(commit, dict):
+                sha = commit.get("sha")
+                if sha:
+                    shas.add(sha)
+        return shas
+
     def pending_conflict_files(self) -> set[str]:
         """Return file paths currently marked as pending human review."""
         pending: set[str] = set()
