@@ -9,6 +9,7 @@ from .engines.repair import (
     OpenAICompatibleSemanticPortClient,
     RepairEngine,
 )
+from .ledger.report import render_ledger
 from .orchestrator.models import GatePolicy, RiskPreference
 from .orchestrator.promotion import (
     PromotionConfig,
@@ -80,12 +81,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Override maximum semantic-port prompt size before truncation",
     )
+
+    inspect_p = sub.add_parser("inspect", help="Read a ledger file and print a human-readable report")
+    inspect_p.add_argument("--ledger-path", required=True, help="Path to ledger JSONL file")
     return parser
 
 
 def main(argv=None):
     parser = build_parser()
     args = parser.parse_args(argv)
+
+    if args.command == "inspect":
+        print(render_ledger(args.ledger_path))
+        return
 
     if args.command == "promote":
         try:

@@ -107,7 +107,7 @@ def test_execute_cherry_pick_conflict_rolls_back_atomic_commit(tmp_path):
     assert (local / "src/core.c").read_text(encoding="utf-8") == "int value = 3;\n"
 
 
-def test_execute_isa_backend_conflict_records_pending_and_blocks_later_commits(tmp_path):
+def test_execute_isa_backend_conflict_records_pending_and_retries_later_commits(tmp_path):
     upstream, local, _base = _make_repos(tmp_path)
     # Seed the rv64 file in upstream, then diverge in local.
     seed_sha = _commit_file(upstream, "src/dynarec/rv64/foo.c", "rv64 old;\n", "add rv64 foo")
@@ -132,7 +132,7 @@ def test_execute_isa_backend_conflict_records_pending_and_blocks_later_commits(t
     assert first_item.git_result.status == GitOperationStatus.ROLLED_BACK
     assert first_item.planned.context.commit.sha == first
     assert second_item.git_result is not None
-    assert second_item.git_result.status == GitOperationStatus.SKIPPED
+    assert second_item.git_result.status == GitOperationStatus.ROLLED_BACK
     assert (local / "src/dynarec/rv64/foo.c").read_text(encoding="utf-8") == "rv64 local;\n"
 
     ledger_text = ledger.read_text(encoding="utf-8")
