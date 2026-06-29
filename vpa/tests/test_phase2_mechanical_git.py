@@ -221,7 +221,7 @@ def test_execute_refuses_dirty_tracked_local_repo(tmp_path):
     assert (local / "src/core.c").read_text(encoding="utf-8") == "int value = 99;\n"
 
 
-def test_execute_reference_isa_change_rolls_back_without_llm(tmp_path):
+def test_execute_reference_isa_change_keeps_cherry_pick_without_llm(tmp_path):
     upstream, local, base = _make_repos(tmp_path)
     head = _commit_file(
         upstream,
@@ -240,12 +240,11 @@ def test_execute_reference_isa_change_rolls_back_without_llm(tmp_path):
 
     assert len(run.executed) == 1
     assert run.executed[0].git_result is not None
-    assert run.executed[0].method == PromotionMethod.SEMANTIC_PORT
-    assert run.executed[0].git_result.status in {
-        GitOperationStatus.SKIPPED,
-        GitOperationStatus.ROLLED_BACK,
-    }
-    assert not (local / "src/dynarec/rv64/foo.c").exists()
+    assert run.executed[0].method == PromotionMethod.CHERRY_PICK
+    assert run.executed[0].git_result.status == GitOperationStatus.APPLIED
+    assert (local / "src/dynarec/rv64/foo.c").read_text(
+        encoding="utf-8"
+    ) == "if(x) return 2;\n"
 
 
 def test_render_run_shows_cherry_pick_execution(tmp_path):

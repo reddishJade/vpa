@@ -165,6 +165,6 @@ def test_execute_isa_translate_without_client_skips(tmp_path):
     assert (local / "src/dynarec/sw64_core3/dynarec_sw64_00.c").read_text(
         encoding="utf-8"
     ) == "int target(void) { return 1; }\n"
-    assert run.executed[0].method == PromotionMethod.SEMANTIC_PORT
+    assert run.executed[0].method == PromotionMethod.CHERRY_PICK
     assert run.executed[0].git_result
-    assert run.executed[0].git_result.status == GitOperationStatus.SKIPPED
+    assert run.executed[0].git_result.status == GitOperationStatus.APPLIED

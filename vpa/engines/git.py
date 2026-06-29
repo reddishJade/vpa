@@ -265,6 +265,7 @@ class GitEngine:
             check=True,
             capture_output=True,
             text=True,
+            errors="surrogateescape",
         )
 
     def _run_result(
@@ -280,6 +281,7 @@ class GitEngine:
             check=False,
             capture_output=True,
             text=True,
+            errors="surrogateescape",
         )
         return GitCommandResult(
             args=["git", *args],

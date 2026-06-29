@@ -207,7 +207,7 @@ class PromotionOrchestrator:
                     failed.append(full_path)
                     continue
                 source_count += 1
-                ok = self._resolve_source_conflict(rel_path)
+                ok = self._resolve_source_conflict(rel_path, planned)
             if ok:
                 resolved.append(full_path)
             else:
@@ -227,21 +227,20 @@ class PromotionOrchestrator:
         return False
 
     def _resolve_non_source_conflict(self, rel_path: Path) -> bool:
-        full_path = self.config.local_repo / rel_path
-        result = self.repair_engine.agent_loop("resolve", file_path=full_path)
-        if result.success:
-            self.local_git._run_result(["add", str(rel_path)])
-            return True
         self.local_git._run_result(["checkout", "--theirs", str(rel_path)])
         self.local_git._run_result(["add", str(rel_path)])
         return True
 
-    def _resolve_source_conflict(self, rel_path: Path) -> bool:
-        full_path = self.config.local_repo / rel_path
-        result = self.repair_engine.agent_loop("resolve", file_path=full_path)
-        if result.success:
-            self.local_git._run_result(["add", str(rel_path)])
-            return True
+    def _resolve_source_conflict(self, rel_path: Path, planned: PlannedCommit) -> bool:
+        if self.ledger is not None:
+            self.ledger.append(
+                PendingConflictRecord(
+                    commit_sha=planned.context.commit.sha,
+                    commit_subject=planned.context.commit.subject,
+                    file_path=rel_path,
+                    category=ConflictCategory.SOURCE,
+                )
+            )
         return False
 
     def _execute_commit(self, planned: PlannedCommit) -> ExecutedCommit:
@@ -281,11 +280,25 @@ class PromotionOrchestrator:
         if planned.gate_decision.kind == GateDecisionKind.NEEDS_SEMANTIC_PORT:
             semantic = self._execute_isa_translate(planned)
             semantic_status = semantic.git_result.status if semantic.git_result else None
-            if semantic_status != GitOperationStatus.APPLIED:
+            if semantic_status == GitOperationStatus.SKIPPED:
+                if self.ledger is not None:
+                    for file_diff in planned.context.diff_context.files:
+                        if file_diff.path is not None:
+                            self.ledger.append(
+                                PendingConflictRecord(
+                                    commit_sha=planned.context.commit.sha,
+                                    commit_subject=planned.context.commit.subject,
+                                    file_path=file_diff.path,
+                                    category=ConflictCategory.ISA_BACKEND,
+                                    status="pending_semantic_port",
+                                )
+                            )
+            elif semantic_status != GitOperationStatus.APPLIED:
                 self.local_git.reset_to_checkpoint(checkpoint)
                 return semantic
-            git_result = semantic.git_result
-            method = PromotionMethod.SEMANTIC_PORT
+            else:
+                git_result = semantic.git_result
+                method = PromotionMethod.SEMANTIC_PORT
 
         validation = run_validation(self.config.local_repo, _validation_commands(self.config))
         if validation.status == ValidationStatus.FAILED:
