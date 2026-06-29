@@ -58,43 +58,43 @@ VPA promotion plan
 
 - 311842a43aa3 Read elf header of launched executable
   classification: unknown
-  change: mixed confidence=0.82
+  change: mixed
   gate: needs_semantic_port
 - a8637ca5d63d Added main elf to context
   classification: shared_code
-  change: logic_change confidence=0.82
+  change: logic_change
   gate: needs_validation_only
 - d7f8625e63fe Future custommem helper init'd and fini'd
   classification: shared_code
-  change: unknown confidence=0.00
+  change: unknown
   gate: needs_validation_only
 - 4079491d5e00 Main elf memory allocated
   classification: shared_code
-  change: logic_change confidence=0.82
+  change: logic_change
   gate: needs_validation_only
 - a2a78a4edc2e Load elf in memory
   classification: shared_code
-  change: logic_change confidence=0.90
+  change: logic_change
   gate: needs_validation_only
 - 542a2a0775e5 Detecting tcmalloc now
   classification: shared_code
-  change: logic_change confidence=0.82
+  change: logic_change
   gate: needs_validation_only
 - 26201d7e7057 More elf loader and parsing and stack preparing
   classification: unknown
-  change: mixed confidence=0.82
+  change: mixed
   gate: needs_semantic_port
 - be92787329b5 Preparing auxval handling
   classification: unknown
-  change: mixed confidence=0.82
+  change: mixed
   gate: needs_semantic_port
 - 997b5c6b50b9 Added some x86_64 regs and emu infrastructure
   classification: unknown
-  change: mixed confidence=0.90
+  change: mixed
   gate: needs_semantic_port
 - 9ae5d6121295 Initializing x64emu structure
   classification: shared_code
-  change: logic_change confidence=0.82
+  change: logic_change
   gate: needs_validation_only
 
 VPA promotion execution
@@ -137,9 +137,10 @@ uv run vpa promote \
 # 帐本行数不变（未重复写入）
 ```
 
-## 历史大数据量测试（之前完成）
+## 历史大数据量测试
 
 ```bash
+# local 基线：SW64-0903 分支（7426 commits），已包含历史 cherry-pick
 # 全范围 1121 commits（从 c674c1311 到 HEAD）
 uv run vpa promote \
   --config /tmp/vpa_test_real/test.toml \
@@ -147,11 +148,11 @@ uv run vpa promote \
   --execute \
   --ledger-path /tmp/vpa_test_real/ledger_upstream.jsonl
 
-# 结果：
+# 结果（从真实基线重测）：
 #   1121 commits 处理
-#   473 committed（cherry-pick 成功）
-#   648 rolled_back（有冲突）
-#   1359 pending 文件待人工审查
+#   210 committed（cherry-pick 成功，local 新增 210 commits 至 7636）
+#   911 rolled_back（因冲突回滚，记录到 pending）
+#   1397 pending 文件（ISA_BACKEND 337 + SOURCE 1060）
 #   0 个 --author 错误
 ```
 
