@@ -776,7 +776,7 @@ def _user_content(op: str, file_path: Path | None, context: CommitContext | None
         ctx = build_semantic_port_context(
             context,
             ChangeAnalysis(
-                kind=ChangeKind.UNKNOWN, confidence=0.0, signals=[],
+                kind=ChangeKind.UNKNOWN, signals=[],
                 changed_symbols=[], mapped_target_candidates=[],
                 suggested_gate=GateDecisionKind.NEEDS_SEMANTIC_PORT,
             ),
@@ -894,7 +894,6 @@ def _semantic_port_user_prompt(context: SemanticPortContext, max_chars: int) -> 
         f"Commit: {context.commit.sha}",
         f"Subject: {context.commit.subject}",
         f"Analysis kind: {context.analysis.kind}",
-        f"Analysis confidence: {context.analysis.confidence:.2f}",
         "Gate reasons:",
         *[f"- {reason}" for reason in context.gate_reasons],
         "",

@@ -472,7 +472,7 @@ def render_plan(plan: PromotionPlan) -> str:
         commit = item.context.commit
         lines.append(f"- {commit.sha[:12]} {commit.subject}")
         lines.append(f"  classification: {item.context.classification.kind}")
-        lines.append(f"  change: {item.analysis.kind} confidence={item.analysis.confidence:.2f}")
+        lines.append(f"  change: {item.analysis.kind}")
         lines.append(f"  gate: {item.gate_decision.kind}")
     if not plan.commits:
         lines.append("(no commits)")

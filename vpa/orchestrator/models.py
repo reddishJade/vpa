@@ -221,7 +221,6 @@ class CommitContext:
 class ChangeSignal:
     kind: ChangeKind
     source: SignalSource
-    confidence: float
     reason: str
     file_path: Path | None = None
     symbol: str | None = None
@@ -230,7 +229,6 @@ class ChangeSignal:
 @dataclass(frozen=True)
 class ChangeAnalysis:
     kind: ChangeKind
-    confidence: float
     signals: list[ChangeSignal]
     changed_symbols: list[str]
     mapped_target_candidates: list[Path]

@@ -80,7 +80,6 @@ class DiffTextAnalyzer(SubAnalyzer):
                     ChangeSignal(
                         kind=ChangeKind.LOGIC_CHANGE,
                         source=SignalSource.DIFF_TEXT,
-                        confidence=0.82,
                         reason="diff contains likely runtime logic tokens",
                         file_path=file_diff.path,
                     )
@@ -90,7 +89,6 @@ class DiffTextAnalyzer(SubAnalyzer):
                     ChangeSignal(
                         kind=ChangeKind.METADATA_ONLY,
                         source=SignalSource.DIFF_TEXT,
-                        confidence=0.78,
                         reason="diff only changes include-style metadata",
                         file_path=file_diff.path,
                     )
@@ -111,7 +109,6 @@ class NormalizationAnalyzer(SubAnalyzer):
                     ChangeSignal(
                         kind=ChangeKind.FORMAT_ONLY,
                         source=SignalSource.NORMALIZED,
-                        confidence=0.9,
                         reason=(
                             "changed lines are equivalent after whitespace/comment "
                             "normalization"
@@ -124,7 +121,6 @@ class NormalizationAnalyzer(SubAnalyzer):
                     ChangeSignal(
                         kind=ChangeKind.FORMAT_ONLY,
                         source=SignalSource.NORMALIZED,
-                        confidence=0.95,
                         reason="diff only changes blank lines",
                         file_path=file_diff.path,
                     )
@@ -136,7 +132,6 @@ class NormalizationAnalyzer(SubAnalyzer):
                     ChangeSignal(
                         kind=ChangeKind.COMMENT_ONLY,
                         source=SignalSource.NORMALIZED,
-                        confidence=0.88,
                         reason="non-comment code is unchanged",
                         file_path=file_diff.path,
                     )
@@ -155,7 +150,6 @@ class SymbolTextAnalyzer(SubAnalyzer):
                     ChangeSignal(
                         kind=ChangeKind.NEW_SYMBOL,
                         source=SignalSource.SYMBOL_TEXT,
-                        confidence=0.78,
                         reason="added function-like symbol",
                         file_path=file_diff.path,
                         symbol=symbol,
@@ -166,7 +160,6 @@ class SymbolTextAnalyzer(SubAnalyzer):
                     ChangeSignal(
                         kind=ChangeKind.REFACTOR,
                         source=SignalSource.SYMBOL_TEXT,
-                        confidence=0.62,
                         reason="changed function-like symbols",
                         file_path=file_diff.path,
                     )
@@ -195,21 +188,18 @@ def analyze(
 def aggregate(signals: list[ChangeSignal], isa_mapping: MappingResult) -> ChangeAnalysis:
     if not signals:
         kind = ChangeKind.UNKNOWN
-        confidence = 0.0
     else:
         meaningful = {signal.kind for signal in signals if _RISK_ORDER[signal.kind] >= 2}
         if len(meaningful) > 1:
             kind = ChangeKind.MIXED
         else:
             kind = max((signal.kind for signal in signals), key=lambda item: _RISK_ORDER[item])
-        confidence = max(signal.confidence for signal in signals)
 
     mapped_targets = _mapped_targets(isa_mapping)
     suggested_gate = _suggest_gate(kind, isa_mapping)
     changed_symbols = sorted({signal.symbol for signal in signals if signal.symbol})
     return ChangeAnalysis(
         kind=kind,
-        confidence=confidence,
         signals=signals,
         changed_symbols=changed_symbols,
         mapped_target_candidates=mapped_targets,
